@@ -1,0 +1,62 @@
+.app-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  background-color: #0f1419;
+  border-bottom: 2px solid #1a237e;
+  padding: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.app-header h1 {
+  color: #64b5f6;
+  font-size: 1.8rem;
+  margin-bottom: 10px;
+}
+
+.app-nav {
+  display: flex;
+  gap: 20px;
+}
+
+.app-nav a {
+  color: #b0bec5;
+  padding: 8px 16px;
+  border-radius: 4px;
+  transition: all 0.3s ease;
+}
+
+.app-nav a:hover,
+.app-nav a.active {
+  background-color: #1a237e;
+  color: #64b5f6;
+}
+
+.app-main {
+  flex: 1;
+  padding: 40px 20px;
+  background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+}
+
+.app-content {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+@media (max-width: 768px) {
+  .app-header h1 {
+    font-size: 1.4rem;
+  }
+
+  .app-main {
+    padding: 20px 10px;
+  }
+
+  .app-nav {
+    flex-direction: column;
+    gap: 10px;
+  }
+}
