@@ -1,0 +1,27 @@
+{
+  "name": "arcadia-for-all-mankind",
+  "version": "0.1.0",
+  "description": "Space Agency management & roleplay simulation. A fork of Arcadia 1.0 with Space Race theme.",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "install-all": "npm install && npm install -w backend && npm install -w frontend",
+    "dev": "npm run dev -w backend & npm run dev -w frontend",
+    "start": "npm start -w backend & npm start -w frontend",
+    "backend": "npm run dev -w backend",
+    "frontend": "npm run dev -w frontend",
+    "build": "npm run build -w frontend"
+  },
+  "keywords": [
+    "space",
+    "agency",
+    "simulation",
+    "roleplay",
+    "game"
+  ],
+  "author": "FrndID",
+  "license": "MIT"
+}
