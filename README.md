@@ -49,7 +49,7 @@ Frontend runs on `http://localhost:5173`
 1. Create a Supabase project at https://supabase.com
 2. Go to SQL Editor
 3. Copy and run the contents of `supabase/schema.sql`
-4. Seed initial technologies (see DEPLOYMENT.md)
+4. The generated schema includes the starter tech catalog and tracking stations. No manual seed is required.
 
 ---
 

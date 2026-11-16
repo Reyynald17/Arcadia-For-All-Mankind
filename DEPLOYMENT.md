@@ -86,25 +86,11 @@ Go to https://supabase.com and create a new project
 2. Paste contents of `supabase/schema.sql`
 3. Run query
 
-### Step 4: Seed Initial Data
+### Step 4: Reference Data
 
-Run this SQL in Supabase:
+`supabase/schema.sql` includes the Era I-IV starter tech catalog and the ground/ship tracking network. No manual seed is required.
 
-```sql
-INSERT INTO technologies (name, era, research_cost_ap, research_cost_budget, duration_days, prerequisite) VALUES
-('Liquid Propulsion', '1969-1975', 10, 20, 14, '{}'),
-('Guidance System', '1969-1975', 12, 25, 21, '{"Liquid Propulsion"}'),
-('Orbital Rocket', '1969-1975', 15, 40, 30, '{"Liquid Propulsion", "Guidance System"}'),
-('Satellite', '1969-1975', 8, 15, 14, '{"Orbital Rocket"}'),
-('Crew Capsule', '1969-1975', 20, 50, 45, '{"Orbital Rocket"}'),
-('Lunar Orbit', '1975-1985', 25, 60, 60, '{"Crew Capsule", "Guidance System"}'),
-('Lunar Landing', '1975-1985', 35, 80, 90, '{"Lunar Orbit"}');
-
-INSERT INTO npcs (name, archetype, ap, budget, rp, si, ipi, slr, strategy) VALUES
-('NPC-Alpha', 'Lunar First', 25, 50, 0, 70, 60, 0, '{"priority": ["orbital", "lunar"]}'::jsonb),
-('NPC-Beta', 'Safe & Steady', 25, 50, 0, 70, 60, 0, '{"priority": ["satellite", "probe"]}'::jsonb),
-('NPC-Gamma', 'Space Pioneer', 25, 50, 0, 70, 60, 0, '{"priority": ["manned", "lunar"]}'::jsonb);
-```
+For an existing shared project, apply `supabase/migrations/001` through `004` in order, then run `npm run db:backfill` and review the dry-run report before applying it.
 
 ---
 

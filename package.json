@@ -13,7 +13,11 @@
     "start": "npm start -w backend & npm start -w frontend",
     "backend": "npm run dev -w backend",
     "frontend": "npm run dev -w frontend",
-    "build": "npm run build -w frontend"
+    "build": "npm run build -w frontend",
+    "db:validate": "node scripts/validate-migrations.mjs",
+    "db:schema": "node scripts/build-schema-snapshot.mjs",
+    "db:backfill": "node backend/scripts/migrate-legacy.mjs",
+    "db:backfill:apply": "node backend/scripts/migrate-legacy.mjs --apply"
   },
   "keywords": [
     "space",
