@@ -17,10 +17,10 @@
 }
 
 body {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  background-color: #0a0e27;
-  color: #e0e0e0;
-  line-height: 1.6;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background-color: #0b0c0e;
+  color: #e2e8f0;
+  line-height: 1.5;
 }
 
 html, body, #root {
@@ -29,66 +29,26 @@ html, body, #root {
 }
 
 a {
-  color: #64b5f6;
+  color: #f5a623;
   text-decoration: none;
-  transition: color 0.3s ease;
 }
 
 a:hover {
-  color: #90caf9;
+  text-decoration: underline;
 }
 
 button {
   cursor: pointer;
-  border: none;
-  border-radius: 4px;
-  padding: 10px 20px;
-  font-size: 1rem;
-  transition: all 0.3s ease;
-}
-
-button:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
-
-input, textarea, select {
-  background-color: #1a1f3a;
-  color: #e0e0e0;
-  border: 1px solid #404854;
-  border-radius: 4px;
-  padding: 10px;
-  font-size: 1rem;
-  transition: border-color 0.3s ease;
-}
-
-input:focus, textarea:focus, select:focus {
-  outline: none;
-  border-color: #64b5f6;
-  box-shadow: 0 0 8px rgba(100, 181, 246, 0.3);
 }
 
 .loading {
   display: flex;
-  justify-content: center;
   align-items: center;
+  justify-content: center;
   height: 100vh;
-  font-size: 1.5rem;
-  color: #64b5f6;
-}
-
-.error {
-  background-color: #c62828;
-  color: white;
-  padding: 15px;
-  border-radius: 4px;
-  margin-bottom: 15px;
-}
-
-.success {
-  background-color: #2e7d32;
-  color: white;
-  padding: 15px;
-  border-radius: 4px;
-  margin-bottom: 15px;
+  background-color: #0b0c0e;
+  color: #9ca3af;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
 }

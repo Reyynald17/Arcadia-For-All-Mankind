@@ -6,12 +6,8 @@ export default function Register({ onRegister }) {
   const [formData, setFormData] = useState({
     email: '',
     password: '',
-    confirmPassword: '',
     agencyName: '',
     country: '',
-    culture: '',
-    history: '',
-    targets: ''
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -19,33 +15,19 @@ export default function Register({ onRegister }) {
 
   const handleChange = (e) => {
     const { name, value } = e.target
-    setFormData(prev => ({ ...prev, [name]: value }))
+    setFormData((prev) => ({ ...prev, [name]: value }))
   }
 
   const handleRegister = async (e) => {
     e.preventDefault()
     setError('')
-
-    if (formData.password !== formData.confirmPassword) {
-      setError('Passwords do not match')
-      return
-    }
-
     setLoading(true)
 
     try {
       const response = await fetch(`${import.meta.env.VITE_API_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: formData.email,
-          password: formData.password,
-          agencyName: formData.agencyName,
-          country: formData.country,
-          culture: formData.culture,
-          history: formData.history,
-          targets: formData.targets
-        })
+        body: JSON.stringify(formData),
       })
 
       const data = await response.json()
@@ -66,125 +48,81 @@ export default function Register({ onRegister }) {
   }
 
   return (
-    <div className="auth-container">
-      <div className="auth-box auth-box-register">
-        <h1>🚀 Arcadia For All Mankind</h1>
-        <h2>Create Your Space Agency</h2>
+    <div className="auth-screen">
+      <div className="auth-panel">
+        <div className="auth-panel-head">
+          <span className="auth-brand">
+            <span className="material-symbols-outlined">satellite_alt</span>
+            ARCADIA : AFM
+          </span>
+          <span className="auth-meta">NEW AGENCY</span>
+        </div>
 
-        {error && <div className="error">{error}</div>}
+        <div className="auth-panel-body">
+          <h1 className="auth-title">Registrasi Agensi</h1>
+          <p className="auth-sub">Inisialisasi direktori // Cycle 14</p>
 
-        <form onSubmit={handleRegister} className="auth-form">
-          <div className="form-group">
-            <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              name="email"
-              value={formData.email}
-              onChange={handleChange}
-              placeholder="your@email.com"
-              required
-            />
-          </div>
+          {error && <div className="auth-error">&gt; {error}</div>}
 
-          <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="password">Password</label>
+          <form onSubmit={handleRegister} className="auth-form">
+            <label className="auth-field">
+              Email
               <input
-                id="password"
+                type="email"
+                name="email"
+                value={formData.email}
+                onChange={handleChange}
+                placeholder="director@agency.gov"
+                autoComplete="email"
+                required
+              />
+            </label>
+
+            <label className="auth-field">
+              Password
+              <input
                 type="password"
                 name="password"
                 value={formData.password}
                 onChange={handleChange}
-                placeholder="••••••••"
+                placeholder="Minimal 6 karakter"
+                autoComplete="new-password"
                 required
               />
-            </div>
-            <div className="form-group">
-              <label htmlFor="confirmPassword">Confirm Password</label>
+            </label>
+
+            <label className="auth-field">
+              Nama Agensi
               <input
-                id="confirmPassword"
-                type="password"
-                name="confirmPassword"
-                value={formData.confirmPassword}
+                type="text"
+                name="agencyName"
+                value={formData.agencyName}
                 onChange={handleChange}
-                placeholder="••••••••"
+                placeholder="Valoria Space Agency"
                 required
               />
-            </div>
-          </div>
+            </label>
 
-          <div className="form-group">
-            <label htmlFor="agencyName">Agency Name</label>
-            <input
-              id="agencyName"
-              type="text"
-              name="agencyName"
-              value={formData.agencyName}
-              onChange={handleChange}
-              placeholder="e.g., Soviet Space Program"
-              required
-            />
-          </div>
-
-          <div className="form-row">
-            <div className="form-group">
-              <label htmlFor="country">Country</label>
+            <label className="auth-field">
+              Negara
               <input
-                id="country"
                 type="text"
                 name="country"
                 value={formData.country}
                 onChange={handleChange}
-                placeholder="e.g., Soviet Union"
-                required
+                placeholder="Valoria"
               />
-            </div>
-            <div className="form-group">
-              <label htmlFor="culture">Culture</label>
-              <input
-                id="culture"
-                type="text"
-                name="culture"
-                value={formData.culture}
-                onChange={handleChange}
-                placeholder="e.g., Communist"
-              />
-            </div>
-          </div>
+            </label>
 
-          <div className="form-group">
-            <label htmlFor="history">History/Background</label>
-            <textarea
-              id="history"
-              name="history"
-              value={formData.history}
-              onChange={handleChange}
-              placeholder="Tell us about your agency..."
-              rows="3"
-            />
-          </div>
+            <button type="submit" className="auth-submit" disabled={loading}>
+              {loading ? 'Mendaftarkan...' : 'Buat Agensi // Register'}
+            </button>
+          </form>
 
-          <div className="form-group">
-            <label htmlFor="targets">Mission Targets</label>
-            <textarea
-              id="targets"
-              name="targets"
-              value={formData.targets}
-              onChange={handleChange}
-              placeholder="What are your goals? (Moon landing, Mars mission, etc.)"
-              rows="3"
-            />
-          </div>
-
-          <button type="submit" className="btn-primary" disabled={loading}>
-            {loading ? 'Creating Agency...' : 'Create Agency'}
-          </button>
-        </form>
-
-        <p className="auth-footer">
-          Already have an account? <Link to="/login">Login here</Link>
-        </p>
+          <p className="auth-foot">
+            Sudah punya agensi? <Link to="/login">Login</Link>
+          </p>
+        </div>
       </div>
     </div>
   )

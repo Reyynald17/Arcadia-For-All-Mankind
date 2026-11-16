@@ -18,7 +18,7 @@ export default function Login({ onLogin }) {
       const response = await fetch(`${import.meta.env.VITE_API_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify({ email, password }),
       })
 
       const data = await response.json()
@@ -39,46 +39,56 @@ export default function Login({ onLogin }) {
   }
 
   return (
-    <div className="auth-container">
-      <div className="auth-box">
-        <h1>🚀 Arcadia For All Mankind</h1>
-        <h2>Login to Your Agency</h2>
+    <div className="auth-screen">
+      <div className="auth-panel">
+        <div className="auth-panel-head">
+          <span className="auth-brand">
+            <span className="material-symbols-outlined">satellite_alt</span>
+            ARCADIA : AFM
+          </span>
+          <span className="auth-meta">SYS.1969</span>
+        </div>
 
-        {error && <div className="error">{error}</div>}
+        <div className="auth-panel-body">
+          <h1 className="auth-title">Mission Control Login</h1>
+          <p className="auth-sub">Akses direktori agensi // Cycle 14</p>
 
-        <form onSubmit={handleLogin} className="auth-form">
-          <div className="form-group">
-            <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your@email.com"
-              required
-            />
-          </div>
+          {error && <div className="auth-error">&gt; {error}</div>}
 
-          <div className="form-group">
-            <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-            />
-          </div>
+          <form onSubmit={handleLogin} className="auth-form">
+            <label className="auth-field">
+              Email
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="director@agency.gov"
+                autoComplete="email"
+                required
+              />
+            </label>
 
-          <button type="submit" className="btn-primary" disabled={loading}>
-            {loading ? 'Logging in...' : 'Login'}
-          </button>
-        </form>
+            <label className="auth-field">
+              Password
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="********"
+                autoComplete="current-password"
+                required
+              />
+            </label>
 
-        <p className="auth-footer">
-          Don't have an account? <Link to="/register">Register here</Link>
-        </p>
+            <button type="submit" className="auth-submit" disabled={loading}>
+              {loading ? 'Menghubungkan...' : 'Masuk // Login'}
+            </button>
+          </form>
+
+          <p className="auth-foot">
+            Belum punya agensi? <Link to="/register">Registrasi</Link>
+          </p>
+        </div>
       </div>
     </div>
   )
