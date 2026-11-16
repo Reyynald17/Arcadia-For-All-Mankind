@@ -2,6 +2,10 @@ const express = require('express');
 const router = express.Router();
 const AGMEngine = require('../services/agm');
 
+const researchName = (log) =>
+  log?.data?.technology ||
+  String(log.description || '').replace(/^Research (?:started|completed):\s*/i, '').trim();
+
 module.exports = (supabase) => {
   // Start research
   router.post('/start', async (req, res) => {
@@ -116,7 +120,7 @@ module.exports = (supabase) => {
     }
   });
 
-  // Get available technologies
+  // Get available technologies (closes research whose duration has elapsed)
   router.get('/available/:agencyId', async (req, res) => {
     try {
       const { agencyId } = req.params;
@@ -135,10 +139,57 @@ module.exports = (supabase) => {
         return res.status(400).json({ error: techResult.error.message });
       }
 
-      res.json({
-        technologies: techResult.data || [],
-        researchLogs: logResult.error ? [] : logResult.data || [],
-      });
+      const technologies = techResult.data || [];
+      let researchLogs = logResult.error ? [] : logResult.data || [];
+
+      const techByName = new Map(technologies.map((tech) => [String(tech.name).toLowerCase(), tech]));
+      const completedTechs = new Set();
+      for (const log of researchLogs) {
+        if (!String(log.event_type || '').includes('COMPLETED')) continue;
+        const name = researchName(log);
+        if (name) completedTechs.add(name.toLowerCase());
+      }
+
+      const now = Date.now();
+      const dueTechs = [];
+      for (const log of researchLogs) {
+        if (log.event_type !== 'RESEARCH_STARTED') continue;
+        const name = researchName(log);
+        if (!name) continue;
+
+        const key = name.toLowerCase();
+        if (completedTechs.has(key)) continue;
+
+        const durationDays = Number(log?.data?.duration_days ?? techByName.get(key)?.duration_days ?? 0);
+        const startedAt = new Date(log.created_at || 0).getTime();
+        if (!durationDays || Number.isNaN(startedAt)) continue;
+        if (now - startedAt < durationDays * 86400000) continue;
+
+        completedTechs.add(key);
+        dueTechs.push(name);
+      }
+
+      if (dueTechs.length > 0) {
+        await supabase.from('logs').insert(
+          dueTechs.map((name) => ({
+            agency_id: agencyId,
+            event_type: 'RESEARCH_COMPLETED',
+            description: `Research completed: ${name}`,
+            data: { technology: name },
+          }))
+        );
+
+        const { data: refreshedLogs } = await supabase
+          .from('logs')
+          .select('event_type, description, data, created_at')
+          .eq('agency_id', agencyId)
+          .like('event_type', 'RESEARCH%')
+          .order('created_at', { ascending: false });
+
+        if (refreshedLogs) researchLogs = refreshedLogs;
+      }
+
+      res.json({ technologies, researchLogs });
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
