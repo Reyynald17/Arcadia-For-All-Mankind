@@ -3,9 +3,15 @@ import { useNavigate } from 'react-router-dom'
 import './Dashboard.css'
 import launchPad from '../assets/launch-pad.jpg'
 import Engineering from './Engineering'
+import Tracking from './Tracking'
+import Relations from './Relations'
+import Calendar from './Calendar'
+import LaunchGlobe from '../components/LaunchGlobe'
+import OnboardingPanel from '../components/OnboardingPanel'
+import TutorialPanel from '../components/TutorialPanel'
+import { clearSession, getAccessToken } from '../lib/session'
 
 const API_BASE = (import.meta.env.VITE_API_URL || 'http://localhost:8787/api').replace(/\/$/, '')
-const MAX_AP = 50
 const CYCLE = '14'
 const MAX_BUFFER = 200
 
@@ -58,9 +64,18 @@ function titleCase(value) {
     .join(' ')
 }
 
-function signed(value, digits = 0) {
-  const n = num(value)
-  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}`
+function vehicleStateLabel(vehicle) {
+  if (vehicle.status === 'manufacturing') return 'PRODUCTION'
+  if (vehicle.status === 'assigned') return 'ASSIGNED'
+  return VEHICLE_LABEL[vehicle.type] || titleCase(vehicle.type)
+}
+
+function formatUsd(value) {
+  const amount = num(value)
+  if (amount >= 1000000000) return `$${(amount / 1000000000).toFixed(2)}B`
+  if (amount >= 1000000) return `$${(amount / 1000000).toFixed(1)}M`
+  if (amount >= 1000) return `$${Math.round(amount / 1000)}K`
+  return `$${Math.round(amount)}`
 }
 
 function formatClock(totalSeconds) {
@@ -81,9 +96,9 @@ function stabilityState(si) {
   return { label: 'KRISIS', tone: 'text-alert-red' }
 }
 
-function budgetState(budget) {
-  if (budget >= 40) return { label: 'KUAT', tone: 'text-neutral-300' }
-  if (budget >= 15) return { label: 'CUKUP', tone: 'text-flight-amber' }
+function fundingState(fundingUsd) {
+  if (fundingUsd >= 50000000) return { label: 'KUAT', tone: 'text-neutral-300' }
+  if (fundingUsd >= 10000000) return { label: 'CUKUP', tone: 'text-flight-amber' }
   return { label: 'TIPIS', tone: 'text-alert-red' }
 }
 
@@ -93,19 +108,11 @@ function eventTone(type) {
   return 'text-neutral-200'
 }
 
-function getSession() {
-  try {
-    return JSON.parse(localStorage.getItem('afm_session') || '{}')
-  } catch {
-    return {}
-  }
-}
-
 async function apiRequest(path, options = {}) {
-  const session = getSession()
+  const token = await getAccessToken()
   const headers = { ...(options.headers || {}) }
   if (options.body) headers['Content-Type'] = 'application/json'
-  if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`
+  if (token) headers.Authorization = `Bearer ${token}`
 
   const response = await fetch(`${API_BASE}${path}`, { ...options, headers })
   let payload = null
@@ -115,8 +122,17 @@ async function apiRequest(path, options = {}) {
     payload = null
   }
 
+  if (response.status === 401) {
+    clearSession()
+    if (window.location.pathname !== '/login') {
+      window.location.href = '/login'
+    }
+  }
+
   if (!response.ok) {
-    throw new Error(payload?.error || `HTTP ${response.status}`)
+    const requestError = new Error(payload?.message || payload?.error || `HTTP ${response.status}`)
+    requestError.code = payload?.error
+    throw requestError
   }
   return payload
 }
@@ -161,9 +177,15 @@ export default function Dashboard({ user }) {
   const [commandBusy, setCommandBusy] = useState(false)
   const [consoleLines, setConsoleLines] = useState(BOOT_LINES)
   const [notice, setNotice] = useState('')
+  const [nowTick, setNowTick] = useState(Date.now())
   const [view, setView] = useState('flight')
   const [engineeringTab, setEngineeringTab] = useState('tech')
+  const [orbitOverview, setOrbitOverview] = useState(null)
+  const [orbitLoading, setOrbitLoading] = useState(false)
+  const [orbitError, setOrbitError] = useState('')
+  const [tutorialOpen, setTutorialOpen] = useState(false)
 
+  const agencyId = dashboard?.agency?.id || agency?.id
   const lineSequence = useRef(BOOT_LINES.length + 1)
   const consoleRef = useRef(null)
   const inputRef = useRef(null)
@@ -204,8 +226,41 @@ export default function Dashboard({ user }) {
     if (user?.id) loadDashboard()
   }, [loadDashboard, user])
 
+  const loadOrbit = useCallback(
+    async ({ silent = true } = {}) => {
+      if (!agencyId) return
+      if (!silent) setOrbitLoading(true)
+      try {
+        const data = await apiRequest(`/orbit/overview/${agencyId}`)
+        setOrbitOverview(data)
+        setOrbitError('')
+      } catch (err) {
+        setOrbitError(err.message || 'Orbit feed unavailable')
+      } finally {
+        if (!silent) setOrbitLoading(false)
+      }
+    },
+    [agencyId],
+  )
+
   useEffect(() => {
-    const timer = setInterval(() => setClock((prev) => prev + 1), 1000)
+    if (!user?.id) return undefined
+    const timer = setInterval(() => loadDashboard({ silent: true }), 30000)
+    return () => clearInterval(timer)
+  }, [loadDashboard, user?.id])
+
+  useEffect(() => {
+    if (!agencyId) return undefined
+    loadOrbit()
+    const timer = setInterval(() => loadOrbit(), 20000)
+    return () => clearInterval(timer)
+  }, [agencyId, loadOrbit])
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setClock((prev) => prev + 1)
+      setNowTick(Date.now())
+    }, 1000)
     return () => clearInterval(timer)
   }, [])
 
@@ -237,24 +292,39 @@ export default function Dashboard({ user }) {
     [dashboard],
   )
 
-  const primaryVehicle = vehicles[0] || null
+  const primaryVehicle =
+    vehicles.find((vehicle) => !['manufacturing', 'assigned'].includes(vehicle.status)) || null
+  const activeMission =
+    (dashboard?.missions || []).find((mission) =>
+      ['PLANNED', 'ROLLOUT', 'COUNTDOWN', 'ASCENT', 'ORBIT'].includes(mission.status),
+    ) || null
+  const missionCountdownSeconds = activeMission?.scheduled_launch_at
+    ? Math.max(0, Math.floor((new Date(activeMission.scheduled_launch_at).getTime() - nowTick) / 1000))
+    : null
+  const displayVehicle =
+    vehicles.find((vehicle) => vehicle.id === activeMission?.vehicle_id) || primaryVehicle
   const agencyRank = num(dashboard?.agencyRank)
   const agencyName = agencyView.name || 'AGENSI TANPA NAMA'
   const country = agencyView.country || 'TIDAK DIKETAHUI'
+  const needsOnboarding = Boolean(agencyView.id)
+    && (!agencyView.profile_complete || !agencyView.launch_site_name)
 
-  const ap = num(agencyView.ap)
-  const budget = num(agencyView.budget)
+  const sciencePoints = num(agencyView.science_points)
+  const fundingUsd = num(agencyView.funding_usd)
   const rp = num(agencyView.rp)
   const si = num(agencyView.si)
   const slr = num(agencyView.slr)
   const totalLaunches = num(agencyView.total_launches)
 
   const siState = stabilityState(si)
-  const budgetFlag = budgetState(budget)
-  const reliability = primaryVehicle ? Math.round(num(primaryVehicle.reliability)) : null
+  const fundingFlag = fundingState(fundingUsd)
+  const reliability = displayVehicle ? Math.round(num(displayVehicle.reliability)) : null
 
   const generateName = (prefix) => `${prefix}-${String(Date.now()).slice(-5)}`
-  const agencyId = agencyView.id
+  const trackedMission =
+    orbitOverview?.missions?.find((mission) => mission.id === activeMission?.id)
+    || orbitOverview?.missions?.[0]
+    || null
 
   const runCommand = useCallback(
     async (raw) => {
@@ -279,7 +349,14 @@ export default function Dashboard({ user }) {
         pushLine('data', '  /luncurkan <tipe> [nama]        - jalankan misi')
         pushLine('data', `     tipe: ${MISSION_TYPES.join(' | ')}`)
         pushLine('data', '  /uji [nama]                     - misi uji teknis cepat')
+        pushLine('data', '  /lacak                          - buka orbital tracking')
         pushLine('data', '  /bersih                         - kosongkan buffer')
+        return
+      }
+
+      if (directive === '/lacak' || directive === '/tracking') {
+        setView('tracking')
+        pushLine('info', '> ORBITAL TRACKING DISPLAY ACTIVE')
         return
       }
 
@@ -303,9 +380,12 @@ export default function Dashboard({ user }) {
             method: 'POST',
             body: JSON.stringify({ agencyId, technologyName: technology }),
           })
-          pushLine('ok', `> RESEARCH STARTED: ${toUpper(result.technology)} // DURASI ${result.durationDays} HARI`)
-          pushLine('data', `> SALDO: AP ${result.newAp} / BUDGET ${result.newBudget} U`)
-          await loadDashboard({ silent: true })
+          pushLine('ok', `> RESEARCH STARTED: ${toUpper(result.technology)} // ${result.durationGameDays} HARI GAME`)
+          pushLine(
+            'data',
+            `> BIAYA ${result.cost?.science_points} SP / ${formatUsd(result.cost?.funding_usd)} // SALDO ${result.newStats?.science_points} SP / ${formatUsd(result.newStats?.funding_usd)}`,
+          )
+          await Promise.all([loadDashboard({ silent: true }), loadOrbit()])
         } else if (directive === '/produksi' || directive === '/produce') {
           const type = (args[0] || '').toLowerCase()
           if (!VEHICLE_TYPES.includes(type)) {
@@ -317,8 +397,11 @@ export default function Dashboard({ user }) {
             method: 'POST',
             body: JSON.stringify({ agencyId, vehicleName: name, vehicleType: type }),
           })
-          pushLine('ok', `> VEHICLE PRODUCED: ${toUpper(result.vehicle.name)} // RELIABILITY ${result.vehicle.reliability}%`)
-          pushLine('data', `> SALDO: AP ${result.newAp} / BUDGET ${result.newBudget} U`)
+          pushLine('ok', `> ASSEMBLY STARTED: ${toUpper(result.vehicle.name)} // ${result.productionGameDays} HARI GAME`)
+          pushLine(
+            'data',
+            `> READY ${formatTime(result.productionCompletesAt)} // SALDO ${formatUsd(result.newStats?.funding_usd)}`,
+          )
           await loadDashboard({ silent: true })
         } else if (['/luncurkan', '/launch', '/uji', '/test'].includes(directive)) {
           const isQuickTest = directive === '/uji' || directive === '/test'
@@ -344,23 +427,16 @@ export default function Dashboard({ user }) {
               missionType: type,
             }),
           })
-          const simulation = result.simulation || {}
-          pushLine(
-            simulation.success ? 'ok' : 'error',
-            `> MISSION ${simulation.success ? 'SUCCESS' : 'FAILURE'} // SCORE ${Math.round(num(simulation.finalScore))}`,
-          )
-          pushLine(
-            simulation.success ? 'ok' : 'warn',
-            `> RP ${signed(simulation.rpGain)} // IPI ${signed(simulation.ipiChange)} // SI ${signed(simulation.siChange)}`,
-          )
-          if (num(simulation.crewDeaths) > 0) {
-            pushLine('error', `> CREW LOSSES: ${simulation.crewDeaths}`)
-          }
+          pushLine('ok', `> LAUNCH WINDOW LOCKED: ${toUpper(missionName)}`)
           pushLine(
             'data',
-            `> SALDO: AP ${result.newStats.ap} / BUDGET ${result.newStats.budget} U / RP ${result.newStats.rp}`,
+            `> ROLLOUT COMPLETE ${formatTime(result.rolloutCompletesAt)} // IGNITION ${formatTime(result.scheduledLaunchAt)}`,
           )
-          await loadDashboard({ silent: true })
+          pushLine(
+            'data',
+            `> SALDO ${formatUsd(result.newStats?.funding_usd)} // SP ${result.newStats?.science_points} // RP ${result.newStats?.rp}`,
+          )
+          await Promise.all([loadDashboard({ silent: true }), loadOrbit()])
         } else {
           throw new Error(`DIRECTIVE TIDAK DIKENAL: ${directive} // GUNAKAN /bantuan`)
         }
@@ -370,7 +446,7 @@ export default function Dashboard({ user }) {
         setCommandBusy(false)
       }
     },
-    [agencyId, commandBusy, loadDashboard, primaryVehicle, pushLine],
+    [agencyId, commandBusy, loadDashboard, loadOrbit, primaryVehicle, pushLine],
   )
 
   const handleCommandSubmit = (event) => {
@@ -383,7 +459,16 @@ export default function Dashboard({ user }) {
 
   const handleLaunch = () => {
     if (commandBusy) return
+    if (activeMission) {
+      setNotice(`MISSION ACTIVE: ${toUpper(activeMission.name)} // ${activeMission.status}`)
+      return
+    }
     if (!primaryVehicle) {
+      const assembly = vehicles.find((vehicle) => vehicle.status === 'manufacturing')
+      if (assembly) {
+        setNotice(`ASSEMBLY IN PROGRESS: ${toUpper(assembly.name)}`)
+        return
+      }
       setCommand('/produksi orbital-rocket ')
       requestAnimationFrame(() => inputRef.current?.focus())
       return
@@ -402,10 +487,51 @@ export default function Dashboard({ user }) {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  const handleTutorialNavigate = (targetView, tab) => {
+    if (targetView === 'engineering') {
+      openEngineering(tab || 'tech')
+      return
+    }
+    if (targetView === 'tracking') {
+      openTracking()
+      return
+    }
+    if (targetView === 'relations') {
+      openRelations()
+      return
+    }
+    openFlight()
+  }
+
+  const handleProfileSaved = useCallback(
+    (updatedAgency) => {
+      if (!updatedAgency) return
+      setAgency(updatedAgency)
+      setDashboard((prev) => (
+        prev ? { ...prev, agency: { ...prev.agency, ...updatedAgency } } : prev
+      ))
+      pushLine('ok', '> AGENCY PROFILE LOCKED // ALIGNMENT + LAUNCH SITE CONFIGURED')
+    },
+    [pushLine],
+  )
+
+  const openTracking = () => {
+    setView('tracking')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const openRelations = () => {
+    setView('relations')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const openCalendar = () => {
+    setView('calendar')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const handleLogout = () => {
-    localStorage.removeItem('afm_user')
-    localStorage.removeItem('afm_session')
-    localStorage.removeItem('afm_agency')
+    clearSession()
     navigate('/login')
   }
 
@@ -461,7 +587,7 @@ export default function Dashboard({ user }) {
           : 'border-transparent text-neutral-400 hover:text-neutral-100'
       }`}
     >
-      <span className="material-symbols-outlined text-sm">{icon}</span>
+      {icon ? <span className="material-symbols-outlined text-sm">{icon}</span> : null}
       {label}
     </button>
   )
@@ -489,6 +615,9 @@ export default function Dashboard({ user }) {
 
           <nav className="flex items-center gap-0.5 overflow-x-auto custom-scroll ml-auto self-stretch">
             {navButton(view === 'flight', openFlight, 'rocket_launch', 'Flight')}
+            {navButton(view === 'tracking', openTracking, 'satellite_alt', 'Tracking')}
+            {navButton(view === 'calendar', openCalendar, 'calendar_month', 'Calendar')}
+            {navButton(view === 'relations', openRelations, null, 'Relations')}
             {navButton(
               view === 'engineering' && engineeringTab !== 'hangar',
               () => openEngineering('tech'),
@@ -501,6 +630,7 @@ export default function Dashboard({ user }) {
               'precision_manufacturing',
               'Hangar',
             )}
+            {navButton(tutorialOpen, () => setTutorialOpen(true), 'school', 'Tutorial')}
           </nav>
 
           <button
@@ -515,11 +645,11 @@ export default function Dashboard({ user }) {
 
         <div className="px-4 py-1.5 border-t border-carbon-border flex flex-wrap items-center gap-x-5 gap-y-1 text-[10px] uppercase tracking-wider text-neutral-400">
           <span>
-            AP <b className="text-neutral-100 text-xs">{ap}</b>/{MAX_AP}
+            SP <b className="text-neutral-100 text-xs tabular-nums">{sciencePoints}</b>
           </span>
           <span>
-            BUDGET <b className="text-neutral-100 text-xs">{budget} U</b>{' '}
-            <span className={budgetFlag.tone}>[{budgetFlag.label}]</span>
+            FUNDING <b className="text-neutral-100 text-xs tabular-nums">{formatUsd(fundingUsd)}</b>{' '}
+            <span className={fundingFlag.tone}>[{fundingFlag.label}]</span>
           </span>
           <span>
             RP <b className="text-neutral-100 text-xs">{rp}</b> <span className="text-neutral-400">#{agencyRank || '—'}</span>
@@ -538,32 +668,46 @@ export default function Dashboard({ user }) {
           </div>
         )}
 
+        {dashboard?.missionsError && (
+          <div className="mb-4 border border-alert-red/40 bg-alert-red/10 text-alert-red px-3 py-2 text-[10px] uppercase tracking-wider">
+            Mission feed degraded: {dashboard.missionsError}
+          </div>
+        )}
+
         {view === 'flight' ? (
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-px bg-carbon-border border border-carbon-border">
             <section className="xl:col-span-8 bg-carbon-surface flex flex-col">
               <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-carbon-border">
                 <h2 className="font-headline text-[11px] font-bold uppercase tracking-widest text-neutral-200 truncate">
-                  Launch Complex 39-B // Pad-01
+                  Launch Complex 39-B // {activeMission ? activeMission.status : 'Pad-01'}
                 </h2>
                 <span className="text-xs text-neutral-300 tracking-widest whitespace-nowrap">
-                  T - {formatClock(countdown)}
+                  {activeMission?.status === 'ORBIT'
+                    ? `ORBIT // ${toUpper(activeMission.name)}`
+                    : `T - ${formatClock(missionCountdownSeconds ?? countdown)}`}
                 </span>
               </div>
 
               <div className="grid sm:grid-cols-2 flex-1">
-                <div
-                  className="relative h-44 sm:h-auto min-h-[180px] bg-cover bg-center border-b sm:border-b-0 sm:border-r border-carbon-border"
-                  style={{ backgroundImage: `url(${launchPad})` }}
-                  role="img"
-                  aria-label="Launch pad 39-B"
-                />
+                {trackedMission ? (
+                  <div className="relative h-44 sm:h-auto min-h-[180px] border-b sm:border-b-0 sm:border-r border-carbon-border bg-carbon-bg">
+                    <LaunchGlobe overview={orbitOverview} mission={trackedMission} />
+                  </div>
+                ) : (
+                  <div
+                    className="relative h-44 sm:h-auto min-h-[180px] bg-cover bg-center border-b sm:border-b-0 sm:border-r border-carbon-border"
+                    style={{ backgroundImage: `url(${launchPad})` }}
+                    role="img"
+                    aria-label="Launch pad 39-B"
+                  />
+                )}
 
                 <div className="p-3 flex flex-col justify-between gap-3">
                   <div className="space-y-1.5 text-xs">
-                    <InfoRow label="VEHICLE" value={primaryVehicle ? toUpper(primaryVehicle.name) : 'NONE'} />
+                    <InfoRow label="VEHICLE" value={displayVehicle ? toUpper(displayVehicle.name) : 'NONE'} />
                     <InfoRow
                       label="TYPE"
-                      value={primaryVehicle ? VEHICLE_LABEL[primaryVehicle.type] || titleCase(primaryVehicle.type) : 'STANDBY'}
+                      value={displayVehicle ? vehicleStateLabel(displayVehicle) : 'STANDBY'}
                     />
                     <InfoRow
                       label="RELIABILITY"
@@ -576,11 +720,11 @@ export default function Dashboard({ user }) {
                   <button
                     type="button"
                     onClick={handleLaunch}
-                    disabled={commandBusy}
+                    disabled={commandBusy || Boolean(activeMission)}
                     className="w-full bg-flight-amber hover:bg-flight-amber-dim disabled:opacity-60 disabled:cursor-not-allowed text-black font-bold text-[11px] uppercase px-3 py-2 flex items-center justify-center gap-1.5 bezier-fast"
                   >
                     <span className="material-symbols-outlined text-sm">rocket_launch</span>
-                    {primaryVehicle ? 'Autorisasi Luncur' : 'Rakit Wahana Dulu'}
+                    {activeMission ? 'Misi Aktif' : primaryVehicle ? 'Autorisasi Luncur' : 'Rakit Wahana Dulu'}
                   </button>
                 </div>
               </div>
@@ -599,7 +743,7 @@ export default function Dashboard({ user }) {
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-[11px] font-bold text-neutral-100 truncate">{toUpper(vehicle.name)}</span>
                         <span className="text-[9px] text-neutral-400 uppercase whitespace-nowrap">
-                          {VEHICLE_LABEL[vehicle.type] || titleCase(vehicle.type)}
+                          {vehicleStateLabel(vehicle)}
                         </span>
                       </div>
                       <div className="flex items-center gap-2 mt-1.5">
@@ -679,24 +823,64 @@ export default function Dashboard({ user }) {
               </div>
             </section>
           </div>
+        ) : view === 'tracking' ? (
+          <Tracking
+            overview={orbitOverview}
+            loading={orbitLoading}
+            error={orbitError}
+            onRefresh={() => loadOrbit({ silent: false })}
+            agencyName={agencyName}
+          />
+        ) : view === 'calendar' ? (
+          <Calendar apiRequest={apiRequest} />
+        ) : view === 'relations' ? (
+          <Relations
+            agencyId={agencyId}
+            agencyName={agencyName}
+            apiRequest={apiRequest}
+            onChange={() => loadDashboard({ silent: true })}
+          />
         ) : (
           <Engineering
             agencyId={agencyId}
             agencyName={agencyName}
-            ap={ap}
-            budget={budget}
+            alignment={agencyView.alignment}
+            westernStanding={num(agencyView.western_standing)}
+            easternStanding={num(agencyView.eastern_standing)}
+            sciencePoints={sciencePoints}
+            fundingUsd={fundingUsd}
             rp={rp}
             vehicles={vehicles}
-            logs={logs}
             tab={engineeringTab}
             onTabChange={setEngineeringTab}
-            onRefresh={() => loadDashboard({ silent: true })}
+            onRefresh={async () => {
+              await loadDashboard({ silent: true })
+              await loadOrbit()
+            }}
             pushLine={pushLine}
             notify={setNotice}
             apiRequest={apiRequest}
           />
         )}
       </main>
+
+      {needsOnboarding && (
+        <OnboardingPanel
+          agency={agencyView}
+          apiRequest={apiRequest}
+          onSaved={handleProfileSaved}
+          onLogout={handleLogout}
+        />
+      )}
+
+      {!needsOnboarding && (
+        <TutorialPanel
+          open={tutorialOpen}
+          onClose={() => setTutorialOpen(false)}
+          agencyId={agencyId}
+          onNavigate={handleTutorialNavigate}
+        />
+      )}
     </div>
   )
 }

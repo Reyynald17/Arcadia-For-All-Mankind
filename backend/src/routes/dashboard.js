@@ -1,7 +1,8 @@
 const express = require('express');
-const router = express.Router();
 
 module.exports = (supabase) => {
+  const router = express.Router();
+
   // Get dashboard data for agency
   router.get('/:agencyId', async (req, res) => {
     try {
@@ -32,13 +33,17 @@ module.exports = (supabase) => {
         .select('*')
         .eq('agency_id', agencyId);
 
-      // Get recent missions
+      // Get recent missions, including scheduled missions that have not launched yet.
       const { data: missions, error: missionsError } = await supabase
         .from('missions')
         .select('*')
         .eq('agency_id', agencyId)
-        .order('launched_at', { ascending: false })
-        .limit(5);
+        .order('scheduled_launch_at', { ascending: false, nullsFirst: false })
+        .limit(10);
+
+      if (missionsError) {
+        console.error('Dashboard missions error:', missionsError);
+      }
 
       // Get ranking
       const { data: ranking, error: rankingError } = await supabase
@@ -54,6 +59,7 @@ module.exports = (supabase) => {
         logs: logs || [],
         vehicles: vehicles || [],
         missions: missions || [],
+        missionsError: missionsError ? missionsError.message : null,
         gameDate: new Date().toISOString()
       });
     } catch (error) {

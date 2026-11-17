@@ -1,9 +1,9 @@
 /* Mission-control theme scoped to the dashboard (Tailwind preflight is disabled). */
 .afm-dashboard {
   min-height: 100vh;
-  background-color: #0b0c0e;
-  color: #e2e8f0;
-  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background-color: #09090b;
+  color: #e4e4e7;
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   line-height: 1.5;
 }
 
@@ -14,7 +14,7 @@
   box-sizing: border-box;
   border-width: 0;
   border-style: solid;
-  border-color: #23272f;
+  border-color: #27272a;
 }
 
 :where(.afm-dashboard) h1,
@@ -62,7 +62,7 @@
 }
 
 :where(.afm-dashboard) button:focus-visible {
-  outline: 1px solid #f5a623;
+  outline: 1px solid #d97706;
   outline-offset: 2px;
 }
 
@@ -88,13 +88,13 @@
 }
 
 .afm-dashboard ::selection {
-  background: rgba(245, 166, 35, 0.25);
+  background: rgba(217, 119, 6, 0.25);
   color: #f8fafc;
 }
 
 .custom-scroll {
   scrollbar-width: thin;
-  scrollbar-color: #23272f #0b0c0e;
+  scrollbar-color: #27272a #09090b;
 }
 
 .custom-scroll::-webkit-scrollbar {
@@ -103,15 +103,15 @@
 }
 
 .custom-scroll::-webkit-scrollbar-track {
-  background: #0b0c0e;
+  background: #09090b;
 }
 
 .custom-scroll::-webkit-scrollbar-thumb {
-  background: #23272f;
+  background: #27272a;
 }
 
 .custom-scroll::-webkit-scrollbar-thumb:hover {
-  background: #2e3440;
+  background: #3f3f46;
 }
 
 .bezier-fast {
@@ -122,7 +122,7 @@
   display: inline-block;
   width: 0.5rem;
   height: 1rem;
-  background: #f5a623;
+  background: #d97706;
   vertical-align: text-bottom;
   animation: afm-blink 1s steps(1) infinite;
 }

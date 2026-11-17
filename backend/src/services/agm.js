@@ -5,63 +5,60 @@
 
 const AGMEngine = {
   /**
-   * Validate research can start
+   * Validate research can start against the canonical economy.
    */
-  validateResearch(agency, technology) {
-    if (agency.ap < technology.research_cost_ap) {
-      return { valid: false, message: 'Insufficient AP' };
+  validateResearch(agency, cost) {
+    if (Number(agency.science_points || 0) < Number(cost.science_points || 0)) {
+      return { valid: false, message: 'Insufficient science points' };
     }
-    if (agency.budget < technology.research_cost_budget) {
-      return { valid: false, message: 'Insufficient budget' };
+    if (Number(agency.funding_usd || 0) < Number(cost.funding_usd || 0)) {
+      return { valid: false, message: 'Insufficient funding' };
     }
     return { valid: true };
   },
 
   /**
-   * Calculate production cost for vehicle type
+   * Calculate production cost for vehicle type (canonical USD).
    */
   calculateProductionCost(vehicleType) {
     const costs = {
-      'sounding-rocket': { ap: 5, budget: 10 },
-      'orbital-rocket': { ap: 8, budget: 20 },
-      'satellite': { ap: 6, budget: 15 },
-      'capsule': { ap: 10, budget: 30 },
-      'probe': { ap: 7, budget: 18 },
-      'lander': { ap: 12, budget: 40 }
+      'sounding-rocket': { funding_usd: 500000 },
+      'orbital-rocket': { funding_usd: 2500000 },
+      'satellite': { funding_usd: 1200000 },
+      'capsule': { funding_usd: 3500000 },
+      'probe': { funding_usd: 1800000 },
+      'lander': { funding_usd: 5000000 },
     };
-    return costs[vehicleType] || { ap: 5, budget: 10 };
+    return costs[vehicleType] || { funding_usd: 500000 };
   },
 
   /**
-   * Validate production can start
+   * Validate production can start.
    */
   validateProduction(agency, productionCost) {
-    if (agency.ap < productionCost.ap) {
-      return { valid: false, message: 'Insufficient AP' };
-    }
-    if (agency.budget < productionCost.budget) {
-      return { valid: false, message: 'Insufficient budget' };
+    if (Number(agency.funding_usd || 0) < Number(productionCost.funding_usd || 0)) {
+      return { valid: false, message: 'Insufficient funding' };
     }
     return { valid: true };
   },
 
   /**
-   * Calculate mission cost
+   * Calculate mission cost (canonical USD).
    */
   calculateMissionCost(missionType) {
     const costs = {
-      'test': { ap: 3, budget: 5 },
-      'scientific': { ap: 5, budget: 15 },
-      'manned': { ap: 8, budget: 30 },
-      'colonial': { ap: 15, budget: 50 }
+      'test': { funding_usd: 250000 },
+      'scientific': { funding_usd: 900000 },
+      'manned': { funding_usd: 2200000 },
+      'colonial': { funding_usd: 5000000 },
     };
-    return costs[missionType] || { ap: 3, budget: 5 };
+    return costs[missionType] || { funding_usd: 250000 };
   },
 
   /**
    * Simulate mission outcome (deterministic)
    */
-  simulateMission(agency, vehicle, missionType) {
+  simulateMission(agency, vehicle, missionType, rng = Math.random) {
     // Base calculation
     let baseReliability = vehicle.reliability;
     let techBonus = Math.floor(agency.rp / 20); // RP contributes to tech bonus
@@ -76,8 +73,9 @@ const AGMEngine = {
     };
     let difficulty = difficultyMap[missionType] || -10;
 
-    // Random variance (-5 to +5)
-    let randomVariance = (Math.random() * 10) - 5;
+    // Random variance (-5 to +5), supplied by the deterministic mission seed
+    const random = typeof rng === 'function' ? rng : Math.random;
+    let randomVariance = (random() * 10) - 5;
 
     // Calculate final score
     let finalScore = baseReliability + techBonus + crewBonus + difficulty + randomVariance;
@@ -86,28 +84,41 @@ const AGMEngine = {
     // Determine outcome
     let success = finalScore >= 50;
     let rpGain = 0;
+    let scienceGain = 0;
     let ipiChange = 0;
     let siChange = 0;
     let crewDeaths = 0;
 
+    const scienceRewards = {
+      'test': 20,
+      'scientific': 50,
+      'manned': 80,
+      'colonial': 120,
+    };
+    const baseScience = scienceRewards[missionType] || 20;
+
     if (finalScore >= 80) {
       // Complete success
       rpGain = 10;
+      scienceGain = baseScience;
       ipiChange = 5;
       siChange = 5;
     } else if (finalScore >= 50) {
       // Partial success
       rpGain = 5;
+      scienceGain = Math.round(baseScience * 0.6);
       ipiChange = 2;
       siChange = 2;
     } else if (finalScore >= 30) {
       // Failure
       rpGain = 0;
+      scienceGain = Math.round(baseScience * 0.15);
       ipiChange = -10;
       siChange = -5;
     } else {
       // Catastrophic failure
       rpGain = 0;
+      scienceGain = 0;
       ipiChange = -20;
       siChange = -15;
       crewDeaths = missionType === 'manned' ? 1 : 0;
@@ -117,6 +128,7 @@ const AGMEngine = {
       success,
       finalScore: Math.round(finalScore),
       rpGain,
+      scienceGain,
       ipiChange,
       siChange,
       crewDeaths

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-
-const MAX_AP = 50
+import TechTree from '../components/TechTree'
 
 const VEHICLE_TYPES = ['sounding-rocket', 'orbital-rocket', 'satellite', 'capsule', 'probe', 'lander']
 
@@ -13,13 +12,13 @@ const VEHICLE_LABEL = {
   lander: 'LANDER',
 }
 
-const VEHICLE_COST = {
-  'sounding-rocket': { ap: 5, budget: 10 },
-  'orbital-rocket': { ap: 8, budget: 20 },
-  satellite: { ap: 6, budget: 15 },
-  capsule: { ap: 10, budget: 30 },
-  probe: { ap: 7, budget: 18 },
-  lander: { ap: 12, budget: 40 },
+const VEHICLE_COST_USD = {
+  'sounding-rocket': 500000,
+  'orbital-rocket': 2500000,
+  satellite: 1200000,
+  capsule: 3500000,
+  probe: 1800000,
+  lander: 5000000,
 }
 
 const VEHICLE_SPEC = {
@@ -31,30 +30,16 @@ const VEHICLE_SPEC = {
   lander: '18.7 T // — // 5,800 m/s',
 }
 
-const TIER_LABEL = {
-  1: 'SUB-ORBITAL & ATMOSFERIK',
-  2: 'ORBIT BUMI & PENERBANGAN BERAWAK',
-  3: 'TRANS-LUNAR & HABITASI',
-}
-
-const STATUS = {
-  completed: { label: 'TUNTAS', tone: 'text-neutral-400' },
-  in_progress: { label: 'DITELITI', tone: 'text-flight-amber' },
-  qualified: { label: 'SIAP', tone: 'text-neutral-300' },
-  locked: { label: 'TERKUNCI', tone: 'text-neutral-400' },
-}
-
 const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0)
-const clamp = (value) => Math.max(0, Math.min(100, num(value)))
 const pad = (value) => String(value).padStart(2, '0')
 const toUpper = (value) => String(value ?? '').toUpperCase()
 
-function titleCase(value) {
-  return String(value ?? '')
-    .split(/[-_\s]+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
+function formatUsd(value) {
+  const amount = num(value)
+  if (amount >= 1000000000) return `$${(amount / 1000000000).toFixed(2)}B`
+  if (amount >= 1000000) return `$${(amount / 1000000).toFixed(1)}M`
+  if (amount >= 1000) return `$${Math.round(amount / 1000)}K`
+  return `$${Math.round(amount)}`
 }
 
 function formatTime(value) {
@@ -64,42 +49,20 @@ function formatTime(value) {
   return `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}Z`
 }
 
-function formatDate(value) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '—'
-  return `${pad(date.getUTCDate())} ${date.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' }).toUpperCase()}`
+function vehicleStateLabel(vehicle) {
+  if (vehicle.status === 'manufacturing') return 'PRODUCTION'
+  if (vehicle.status === 'assigned') return 'ASSIGNED'
+  return `${Math.round(num(vehicle.reliability))}%`
 }
 
-function eventTechName(log) {
-  const data = log?.data
-  if (data && typeof data === 'object' && data.technology) return String(data.technology)
-  const match = String(log?.description || '').match(/^Research (?:started|completed):\s*(.+)$/i)
-  return match ? match[1].trim() : ''
-}
-
-function buildResearchEvents(logs) {
-  const map = new Map()
-  for (const log of logs) {
-    const type = toUpper(log.event_type)
-    if (!type.startsWith('RESEARCH_')) continue
-    const name = eventTechName(log)
-    if (!name) continue
-
-    const key = name.toLowerCase()
-    const completed = type.includes('COMPLETED')
-    const current = map.get(key)
-    if (!current) {
-      map.set(key, { log, completed })
-      continue
-    }
-    const incomingNewer =
-      new Date(log.created_at || 0).getTime() > new Date(current.log.created_at || 0).getTime()
-    map.set(key, {
-      log: incomingNewer ? log : current.log,
-      completed: current.completed || completed,
-    })
+function techEmbargoed(tech, alignment, westernStanding, easternStanding) {
+  const affinity = String(tech.alignment_affinity || '').toUpperCase()
+  if (!tech.is_export_controlled || affinity === 'ANY' || affinity === String(alignment || '').toUpperCase()) {
+    return false
   }
-  return map
+  const required = num(tech.spec?.embargo_risk?.min_standing_required ?? 70)
+  const standing = affinity === 'WESTERN' ? num(westernStanding) : num(easternStanding)
+  return standing < required
 }
 
 function PanelHead({ title, right }) {
@@ -116,11 +79,13 @@ function PanelHead({ title, right }) {
 export default function Engineering({
   agencyId,
   agencyName,
-  ap,
-  budget,
+  alignment,
+  westernStanding,
+  easternStanding,
+  sciencePoints,
+  fundingUsd,
   rp,
   vehicles,
-  logs,
   tab,
   onTabChange,
   onRefresh,
@@ -129,14 +94,14 @@ export default function Engineering({
   apiRequest,
 }) {
   const [technologies, setTechnologies] = useState([])
-  const [researchLogs, setResearchLogs] = useState(null)
+  const [nodes, setNodes] = useState([])
   const [techLoading, setTechLoading] = useState(true)
   const [techError, setTechError] = useState('')
   const [selectedType, setSelectedType] = useState('orbital-rocket')
   const [vehicleName, setVehicleName] = useState('')
   const [researchBusy, setResearchBusy] = useState(null)
+  const [staticFireBusy, setStaticFireBusy] = useState(null)
   const [productionBusy, setProductionBusy] = useState(false)
-  const [, setTick] = useState(0)
 
   const loadTechnologies = useCallback(async () => {
     if (!agencyId) return
@@ -146,10 +111,10 @@ export default function Engineering({
       const payload = await apiRequest(`/research/available/${agencyId}`)
       if (Array.isArray(payload)) {
         setTechnologies(payload)
-        setResearchLogs(null)
+        setNodes([])
       } else {
         setTechnologies(Array.isArray(payload?.technologies) ? payload.technologies : [])
-        setResearchLogs(Array.isArray(payload?.researchLogs) ? payload.researchLogs : [])
+        setNodes(Array.isArray(payload?.nodes) ? payload.nodes : [])
       }
     } catch (err) {
       setTechError(err.message || 'Matriks riset tidak dapat dimuat')
@@ -163,86 +128,87 @@ export default function Engineering({
     loadTechnologies()
   }, [loadTechnologies])
 
-  useEffect(() => {
-    const timer = setInterval(() => setTick((prev) => prev + 1), 30000)
-    return () => clearInterval(timer)
-  }, [])
-
-  const researchEvents = useMemo(() => buildResearchEvents(researchLogs ?? logs), [logs, researchLogs])
-  const completedTechs = useMemo(
-    () =>
-      new Set(
-        [...researchEvents.entries()].filter(([, event]) => event.completed).map(([name]) => name),
-      ),
-    [researchEvents],
+  const techById = useMemo(
+    () => new Map(technologies.map((tech) => [tech.node_id, tech])),
+    [technologies],
+  )
+  const nodeByNodeId = useMemo(
+    () => new Map(nodes.map((node) => [node.node_id, node])),
+    [nodes],
   )
 
   const techRows = useMemo(
-    () =>
-      technologies.map((tech) => {
-        const matchedTier = String(tech.era || '').match(/\d+/)
-        const tier = matchedTier ? Number(matchedTier[0]) : 1
-        const prerequisites = Array.isArray(tech.prerequisite) ? tech.prerequisite.filter(Boolean) : []
-        const prereqMet = prerequisites.every((name) => completedTechs.has(String(name).toLowerCase()))
-        const event = researchEvents.get(String(tech.name || '').toLowerCase())
+    () => technologies.map((tech) => {
+      const tier = num(tech.era_number) || Number(String(tech.era || '').match(/\d+/)?.[0]) || 1
+      const prereqIds = Array.isArray(tech.prerequisite_node_ids)
+        ? tech.prerequisite_node_ids.filter(Boolean)
+        : []
+      const prereqNames = prereqIds.map(
+        (nodeId) => techById.get(nodeId)?.name || nodeId,
+      )
+      const prereqMet = prereqIds.every(
+        (nodeId) => nodeByNodeId.get(nodeId)?.status === 'UNLOCKED',
+      )
+      const node = nodeByNodeId.get(tech.node_id) || null
 
-        let status = 'qualified'
-        if (event?.completed) status = 'completed'
-        else if (event) status = 'in_progress'
-        else if (!prereqMet) status = 'locked'
+      let status = 'qualified'
+      if (node?.status === 'UNLOCKED') status = 'completed'
+      else if (node?.status === 'RESEARCHING') status = 'in_progress'
+      else if (
+        node?.status === 'EMBARGOED'
+        || techEmbargoed(tech, alignment, westernStanding, easternStanding)
+      ) status = 'embargoed'
+      else if (node?.status === 'LOCKED' || !prereqMet) status = 'locked'
 
-        return {
-          tech,
-          tier,
-          groupKey: tier <= 2 ? tier : 3,
-          prerequisites,
-          event,
-          status,
-        }
-      }),
-    [completedTechs, researchEvents, technologies],
+      const modifier = tech.spec?.cost_modifiers?.[alignment] || {}
+      const scienceMultiplier = num(modifier.science_mult) || 1
+      const daysMultiplier = num(modifier.days_mult) || 1
+      const scienceCost = Math.max(
+        1,
+        Math.round(num(tech.research_cost_science) * scienceMultiplier),
+      )
+      const fundingCost = num(tech.research_cost_funding)
+      const baseDays = Math.round(num(tech.base_days) * daysMultiplier)
+
+      return {
+        tech,
+        tier,
+        prereqNames,
+        node,
+        status,
+        scienceCost,
+        fundingCost,
+        baseDays,
+      }
+    }),
+    [alignment, easternStanding, nodeByNodeId, techById, technologies, westernStanding],
   )
 
-  const techGroups = useMemo(() => {
-    const groups = new Map()
-    for (const row of techRows) {
-      if (!groups.has(row.groupKey)) groups.set(row.groupKey, [])
-      groups.get(row.groupKey).push(row)
-    }
-    return [...groups.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([key, rows]) => ({
-        key,
-        badge: key === 3 ? 'TIER 03-04' : `TIER ${pad(key)}`,
-        label: TIER_LABEL[key] || `TIER ${pad(key)}`,
-        rows,
-      }))
-  }, [techRows])
-
-  const completedCount = techRows.filter((row) => row.status === 'completed').length
-  const inProgressCount = techRows.filter((row) => row.status === 'in_progress').length
-
-  const selectedCost = VEHICLE_COST[selectedType]
-  const canAfford = ap >= selectedCost.ap && budget >= selectedCost.budget
+  const selectedCost = VEHICLE_COST_USD[selectedType]
+  const canAfford = fundingUsd >= selectedCost
   const autoName = `AUTO-${VEHICLE_LABEL[selectedType].replace(/\s+/g, '-')}`
-  const primaryVehicle = vehicles[0] || null
+  const primaryVehicle =
+    vehicles.find((vehicle) => !['manufacturing', 'assigned'].includes(vehicle.status)) || null
   const blueprintReliability =
     primaryVehicle && primaryVehicle.type === selectedType ? Math.round(num(primaryVehicle.reliability)) : 70
 
-  const startResearch = async (tech) => {
+  const startResearch = async (row) => {
     if (!agencyId || researchBusy) return
-    setResearchBusy(tech.id)
+    setResearchBusy(row.tech.node_id)
     try {
       const result = await apiRequest('/research/start', {
         method: 'POST',
-        body: JSON.stringify({ agencyId, technologyName: tech.name }),
+        body: JSON.stringify({ agencyId, nodeId: row.tech.node_id }),
       })
       pushLine(
         'ok',
-        `> RESEARCH STARTED: ${toUpper(result.technology || tech.name)} // DURASI ${result.durationDays ?? tech.duration_days} HARI`,
+        `> RESEARCH STARTED: ${toUpper(result.technology || row.tech.name)} // ${result.durationGameDays ?? row.baseDays} HARI GAME`,
       )
-      pushLine('data', `> SALDO: AP ${result.newAp} / BUDGET ${result.newBudget} U`)
-      notify(`RISET DIMULAI: ${toUpper(tech.name)}`)
+      pushLine(
+        'data',
+        `> BIAYA: ${result.cost?.science_points ?? row.scienceCost} SP // ${formatUsd(result.cost?.funding_usd ?? row.fundingCost)} // SALDO ${result.newStats?.science_points} SP`,
+      )
+      notify(`RISET DIMULAI: ${toUpper(row.tech.name)}`)
       await Promise.all([onRefresh(), loadTechnologies()])
     } catch (err) {
       pushLine('error', `> RESEARCH ERROR: ${toUpper(err.message || 'UNKNOWN')}`)
@@ -252,10 +218,41 @@ export default function Engineering({
     }
   }
 
+  const runStaticFire = async (row) => {
+    if (!agencyId || staticFireBusy) return
+    const testCost = num(row.tech.static_test_cost)
+    if (fundingUsd < testCost) {
+      notify(`UJI STATIS DITOLAK: BUTUH ${formatUsd(testCost)}`)
+      return
+    }
+    setStaticFireBusy(row.tech.node_id)
+    try {
+      const result = await apiRequest('/research/static-fire', {
+        method: 'POST',
+        body: JSON.stringify({ agencyId, nodeId: row.tech.node_id }),
+      })
+      pushLine(
+        'ok',
+        `> STATIC FIRE SCHEDULED: ${toUpper(result.technology || row.tech.name)} // ${result.durationGameDays} HARI GAME`,
+      )
+      pushLine(
+        'data',
+        `> BURN ${result.burnSeconds}S // SELESAI ${formatTime(result.completesAt)} // BIAYA ${formatUsd(result.testCostUsd)}`,
+      )
+      notify(`UJI STATIS DIJADWALKAN: ${toUpper(row.tech.name)}`)
+      await Promise.all([onRefresh(), loadTechnologies()])
+    } catch (err) {
+      pushLine('error', `> STATIC FIRE ERROR: ${toUpper(err.message || 'UNKNOWN')}`)
+      notify(`UJI STATIS GAGAL: ${toUpper(err.message || 'UNKNOWN')}`)
+    } finally {
+      setStaticFireBusy(null)
+    }
+  }
+
   const fabricate = async () => {
     if (!agencyId || productionBusy) return
     if (!canAfford) {
-      notify(`FABRIKASI DITOLAK: BUTUH ${selectedCost.ap} AP + ${selectedCost.budget} U`)
+      notify(`FABRIKASI DITOLAK: BUTUH ${formatUsd(selectedCost)}`)
       return
     }
     const name = vehicleName.trim() || `${autoName}-${String(Date.now()).slice(-5)}`
@@ -267,10 +264,13 @@ export default function Engineering({
       })
       pushLine(
         'ok',
-        `> VEHICLE PRODUCED: ${toUpper(result.vehicle?.name || name)} // RELIABILITY ${result.vehicle?.reliability ?? 70}%`,
+        `> ASSEMBLY STARTED: ${toUpper(result.vehicle?.name || name)} // ${result.productionGameDays} HARI GAME`,
       )
-      pushLine('data', `> SALDO: AP ${result.newAp} / BUDGET ${result.newBudget} U`)
-      notify(`FABRIKASI SELESAI: ${toUpper(name)}`)
+      pushLine(
+        'data',
+        `> READY ${formatTime(result.productionCompletesAt)} // SALDO ${formatUsd(result.newStats?.funding_usd)}`,
+      )
+      notify(`FABRIKASI DIMULAI: ${toUpper(name)}`)
       setVehicleName('')
       await onRefresh()
     } catch (err) {
@@ -318,135 +318,18 @@ export default function Engineering({
 
       <div className="grid grid-cols-1 gap-4">
         {techTabActive && (
-        <section className="bg-carbon-surface border border-carbon-border flex flex-col">
-          <PanelHead
-            title="Pohon Teknologi"
-            right={`${completedCount}/${techRows.length} TUNTAS // ${inProgressCount} DITELITI`}
+          <TechTree
+            rows={techRows}
+            loading={techLoading}
+            error={techError}
+            onRetry={loadTechnologies}
+            researchBusy={researchBusy}
+            staticFireBusy={staticFireBusy}
+            sciencePoints={sciencePoints}
+            fundingUsd={fundingUsd}
+            onStartResearch={startResearch}
+            onStaticFire={runStaticFire}
           />
-
-          <div className="flex-1 px-3 py-2">
-            {techLoading ? (
-              <div className="py-10 text-center text-[11px] text-neutral-400">
-                // SINKRONISASI MATRIKS<span className="afm-cursor ml-2" />
-              </div>
-            ) : techError ? (
-              <div className="py-3 text-[11px] text-alert-red">
-                <p>&gt; MATRIKS OFFLINE: {toUpper(techError)}</p>
-                <button
-                  type="button"
-                  onClick={loadTechnologies}
-                  className="mt-2 border border-alert-red/50 hover:bg-alert-red/10 px-2 py-1 text-[10px] font-bold uppercase"
-                >
-                  Retry
-                </button>
-              </div>
-            ) : techRows.length === 0 ? (
-              <div className="py-8 text-center text-[10px] text-neutral-400 uppercase">
-                Tidak ada node teknologi
-                <button
-                  type="button"
-                  onClick={loadTechnologies}
-                  className="mt-2 block mx-auto border border-carbon-border hover:border-carbon-border-light px-2 py-1 font-bold text-neutral-200"
-                >
-                  Refresh
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-5">
-                {techGroups.map((group) => (
-                  <section key={group.key}>
-                    <div className="flex items-baseline gap-2 border-b border-carbon-border pb-1.5">
-                      <span className="text-[9px] font-bold text-neutral-200 tracking-wider">{group.badge}</span>
-                      <span className="text-[9px] uppercase tracking-wider text-neutral-400 truncate">{group.label}</span>
-                      <span className="ml-auto text-[9px] text-neutral-400 whitespace-nowrap">
-                        {group.rows.filter((row) => row.status === 'completed').length}/{group.rows.length}
-                      </span>
-                    </div>
-
-                    <div className="divide-y divide-carbon-border">
-                      {group.rows.map((row) => {
-                        const { tech, status, prerequisites, event } = row
-                        const state = STATUS[status]
-                        const affordable =
-                          ap >= num(tech.research_cost_ap) && budget >= num(tech.research_cost_budget)
-                        const durationMs = Math.max(1, num(tech.duration_days)) * 86400000
-                        const progress =
-                          status === 'in_progress' && event
-                            ? clamp(
-                                Math.round(
-                                  ((Date.now() - new Date(event.log.created_at || 0).getTime()) / durationMs) * 100,
-                                ),
-                              )
-                            : 0
-                        const finishLabel =
-                          status === 'in_progress' && event
-                            ? formatDate(new Date(event.log.created_at || 0).getTime() + durationMs)
-                            : null
-
-                        return (
-                          <article key={tech.id || tech.name} className="py-2 flex items-start gap-3">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className={`text-[9px] font-bold uppercase tracking-wider ${state.tone}`}>
-                                  {state.label}
-                                </span>
-                              </div>
-                              <h3
-                                className={`font-headline font-bold text-[11px] uppercase leading-snug mt-0.5 ${
-                                  status === 'locked' ? 'text-neutral-400' : 'text-neutral-100'
-                                }`}
-                              >
-                                {toUpper(tech.name)}
-                              </h3>
-
-                              {status === 'locked' ? (
-                                <p className="text-[9px] text-neutral-400 mt-0.5 truncate">
-                                  Butuh: {prerequisites.length ? prerequisites.join(' // ') : 'node induk'}
-                                </p>
-                              ) : (
-                                <p className="text-[9px] text-neutral-400 mt-0.5">
-                                  {num(tech.research_cost_ap)} AP // {num(tech.research_cost_budget)} U //{' '}
-                                  {num(tech.duration_days)} HARI
-                                </p>
-                              )}
-
-                              {status === 'in_progress' && (
-                                <div className="mt-1.5">
-                                  <div className="h-1 bg-carbon-bg">
-                                    <div className="h-full bg-flight-amber" style={{ width: `${progress}%` }} />
-                                  </div>
-                                  <div className="flex justify-between text-[9px] text-neutral-400 mt-0.5">
-                                    <span>{progress}%</span>
-                                    <span>SELESAI ~{finishLabel}</span>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-
-                            {status === 'qualified' && (
-                              <button
-                                type="button"
-                                onClick={() => startResearch(tech)}
-                                disabled={Boolean(researchBusy) || !affordable}
-                                className={`shrink-0 px-2.5 py-1.5 border text-[9px] font-bold uppercase tracking-wider bezier-fast ${
-                                  affordable
-                                    ? 'border-flight-amber/50 text-flight-amber hover:bg-flight-amber/10'
-                                    : 'border-carbon-border text-neutral-400 cursor-not-allowed'
-                                }`}
-                              >
-                                {researchBusy === tech.id ? '...' : researchBusy ? 'BUSY' : 'Riset'}
-                              </button>
-                            )}
-                          </article>
-                        )
-                      })}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            )}
-          </div>
-        </section>
         )}
 
         {!techTabActive && (
@@ -459,11 +342,11 @@ export default function Engineering({
               <svg viewBox="0 0 200 120" className="w-full h-28" fill="none" aria-hidden="true">
                 <rect x="88" y="6" width="24" height="18" rx="9" fill="#9CA3AF" fillOpacity="0.08" stroke="#9CA3AF" strokeWidth="1" />
                 <rect x="86" y="24" width="28" height="22" fill="#9CA3AF" fillOpacity="0.06" stroke="#9CA3AF" strokeWidth="1" />
-                <rect x="84" y="46" width="32" height="40" fill="#F5A623" fillOpacity="0.06" stroke="#F5A623" strokeWidth="1" />
-                <path d="M 84 86 L 74 100 L 84 96 Z" fill="#F5A623" fillOpacity="0.25" stroke="#F5A623" strokeWidth="1" />
-                <path d="M 116 86 L 126 100 L 116 96 Z" fill="#F5A623" fillOpacity="0.25" stroke="#F5A623" strokeWidth="1" />
-                <path d="M 92 96 L 88 112 L 112 112 L 108 96 Z" fill="#F5A623" fillOpacity="0.1" stroke="#F5A623" strokeDasharray="2,2" strokeWidth="1" />
-                <text x="100" y="118" textAnchor="middle" fill="#9CA3AF" fontFamily="JetBrains Mono, monospace" fontSize="6">
+                <rect x="84" y="46" width="32" height="40" fill="#D97706" fillOpacity="0.06" stroke="#D97706" strokeWidth="1" />
+                <path d="M 84 86 L 74 100 L 84 96 Z" fill="#D97706" fillOpacity="0.25" stroke="#D97706" strokeWidth="1" />
+                <path d="M 116 86 L 126 100 L 116 96 Z" fill="#D97706" fillOpacity="0.25" stroke="#D97706" strokeWidth="1" />
+                <path d="M 92 96 L 88 112 L 112 112 L 108 96 Z" fill="#D97706" fillOpacity="0.1" stroke="#D97706" strokeDasharray="2,2" strokeWidth="1" />
+                <text x="100" y="118" textAnchor="middle" fill="#9CA3AF" fontFamily="IBM Plex Mono, monospace" fontSize="6">
                   {VEHICLE_LABEL[selectedType]} // REL {blueprintReliability}%
                 </text>
               </svg>
@@ -491,7 +374,7 @@ export default function Engineering({
                         {toUpper(vehicle.name)}
                       </span>
                       <span className="text-[9px] text-neutral-400 whitespace-nowrap">
-                        {Math.round(num(vehicle.reliability))}% // {formatTime(vehicle.created_at)}
+                        {vehicleStateLabel(vehicle)} // {formatTime(vehicle.created_at)}
                       </span>
                     </div>
                   ))}
@@ -505,7 +388,7 @@ export default function Engineering({
               <div className="text-[9px] uppercase tracking-wider text-neutral-400 mb-1">Klasifikasi</div>
               <div className="grid grid-cols-2">
                 {VEHICLE_TYPES.map((type) => {
-                  const cost = VEHICLE_COST[type]
+                  const cost = VEHICLE_COST_USD[type]
                   const active = type === selectedType
                   return (
                     <button
@@ -520,8 +403,8 @@ export default function Engineering({
                       }`}
                     >
                       <span className="text-[9px] font-bold truncate">{VEHICLE_LABEL[type]}</span>
-                      <span className="text-[8px] text-neutral-400 whitespace-nowrap">
-                        {cost.ap} AP // {cost.budget} U
+                      <span className="text-[8px] text-neutral-400 whitespace-nowrap tabular-nums">
+                        {formatUsd(cost)}
                       </span>
                     </button>
                   )
@@ -557,12 +440,12 @@ export default function Engineering({
               <span className="material-symbols-outlined text-sm">precision_manufacturing</span>
               {productionBusy
                 ? 'Integrasi...'
-                : `Fabrikasi // ${selectedCost.ap} AP + ${selectedCost.budget} U`}
+                : `Fabrikasi // ${formatUsd(selectedCost)}`}
             </button>
 
-            <div className="flex items-center justify-between text-[9px] text-neutral-400 border-t border-carbon-border pt-1.5">
+            <div className="flex items-center justify-between text-[9px] text-neutral-400 border-t border-carbon-border pt-1.5 tabular-nums">
               <span>BONUS RP +{Math.floor(rp / 20)}%</span>
-              <span>AP {ap}/{MAX_AP} // {budget} U</span>
+              <span>{sciencePoints} SP // {formatUsd(fundingUsd)}</span>
             </div>
             </div>
           </div>

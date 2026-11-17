@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
+import { saveSession } from '../lib/session'
+import { serializeProfileForm, validateProfileForm } from '../lib/agencyProfile'
+import AgencyProfileFields from '../components/AgencyProfileFields'
 import './Auth.css'
 
 export default function Register({ onRegister }) {
@@ -8,6 +11,10 @@ export default function Register({ onRegister }) {
     password: '',
     agencyName: '',
     country: '',
+    alignment: '',
+    launchSiteName: '',
+    launchSiteLat: '',
+    launchSiteLon: '',
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -21,23 +28,37 @@ export default function Register({ onRegister }) {
   const handleRegister = async (e) => {
     e.preventDefault()
     setError('')
+
+    const profileError = validateProfileForm(formData)
+    if (profileError) {
+      setError(profileError)
+      return
+    }
+
     setLoading(true)
 
     try {
       const response = await fetch(`${import.meta.env.VITE_API_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          email: formData.email,
+          password: formData.password,
+          agencyName: formData.agencyName,
+          country: formData.country,
+          ...serializeProfileForm(formData),
+        }),
       })
 
       const data = await response.json()
 
       if (!response.ok) {
-        throw new Error(data.error || 'Registration failed')
+        throw new Error(data.message || data.error || 'Registration failed')
       }
 
       localStorage.setItem('afm_user', JSON.stringify(data.user))
       localStorage.setItem('afm_agency', JSON.stringify(data.agency))
+      saveSession(data.session)
       onRegister(data.user)
       navigate('/dashboard')
     } catch (err) {
@@ -113,6 +134,18 @@ export default function Register({ onRegister }) {
                 placeholder="Valoria"
               />
             </label>
+
+            <div className="auth-section">
+              <span>Profil Operasional</span>
+              <p>Alignment dan launch site dipakai untuk diplomasi serta peluncuran.</p>
+            </div>
+
+            <AgencyProfileFields
+              form={formData}
+              onChange={setFormData}
+              variant="auth"
+              disabled={loading}
+            />
 
             <button type="submit" className="auth-submit" disabled={loading}>
               {loading ? 'Mendaftarkan...' : 'Buat Agensi // Register'}

@@ -10,6 +10,9 @@ const expectedFiles = [
   '002_rls.sql',
   '003_seed_tech.sql',
   '004_seed_stations.sql',
+  '005_diplomacy.sql',
+  '006_diplomacy_rls.sql',
+  '007_seed_npc_diplomacy.sql',
 ];
 const requiredTables = [
   'seasons',
@@ -217,6 +220,74 @@ for (const line of stationRows) {
 
 if (stationRows.length === 0) errors.push('004 contains no station rows.');
 notes.push(`Ground stations: ${stationCodes.size}`);
+
+const diplomacyTables = [
+  'agency_relations',
+  'diplomatic_proposals',
+  'agency_agreements',
+  'diplomatic_events',
+  'agency_bloc_saturation',
+];
+
+for (const table of diplomacyTables) {
+  if (!new RegExp(`create\\s+table\\s+if\\s+not\\s+exists\\s+${table}\\b`, 'i').test(sql['005_diplomacy.sql'])) {
+    errors.push(`005 is missing CREATE TABLE IF NOT EXISTS ${table}.`);
+  }
+  if (!new RegExp(`alter\\s+table\\s+${table}\\s+enable\\s+row\\s+level\\s+security`, 'i').test(sql['006_diplomacy_rls.sql'])) {
+    errors.push(`006 is missing RLS enablement for ${table}.`);
+  }
+  if (!new RegExp(`create\\s+policy\\s+${table}_read_own`, 'i').test(sql['006_diplomacy_rls.sql'])) {
+    errors.push(`006 is missing the read-own policy for ${table}.`);
+  }
+}
+
+for (const column of ['bloc', 'controller_type', 'npc_profile', 'is_active']) {
+  if (!new RegExp(`add\\s+column\\s+if\\s+not\\s+exists\\s+${column}\\b`, 'i').test(sql['005_diplomacy.sql'])) {
+    errors.push(`005 is missing agencies.${column}.`);
+  }
+}
+
+for (const rpc of [
+  'diplomacy_bloc_size',
+  'diplomacy_counterpart_count',
+  'diplomacy_saturation_snapshot',
+  'diplomacy_refresh_saturation',
+  'accept_diplomatic_proposal',
+]) {
+  if (!new RegExp(`create\\s+or\\s+replace\\s+function\\s+${rpc}\\s*\\(`, 'i').test(sql['005_diplomacy.sql'])) {
+    errors.push(`005 is missing function ${rpc}.`);
+  }
+}
+
+if (!/create\s+unique\s+index\s+if\s+not\s+exists\s+diplomatic_proposals_pending_pair_idx/i.test(sql['005_diplomacy.sql'])) {
+  errors.push('005 is missing the pending-pair unique index for diplomatic_proposals.');
+}
+if (!/create\s+index\s+if\s+not\s+exists\s+agency_agreements_live_idx/i.test(sql['005_diplomacy.sql'])) {
+  errors.push('005 is missing the live agreement index for agency_agreements.');
+}
+
+const npcRows = sql['007_seed_npc_diplomacy.sql']
+  .split('\n')
+  .filter((line) => /^\s*\('NPC_[A-Z0-9_]+',/.test(line));
+const npcBlocs = { western: 0, eastern: 0, neutral: 0 };
+const npcCodes = new Set();
+for (const line of npcRows) {
+  const match = line.match(/^\s*\('([A-Z0-9_]+)',\s*'[^']*',\s*'[^']*',\s*'(western|eastern|neutral)',\s*'[^']*',\s*'(cooperative|opportunistic|isolationist)'/);
+  if (!match) {
+    errors.push(`Could not parse NPC seed row: ${line.trim().slice(0, 60)}...`);
+    continue;
+  }
+  const [, code, bloc] = match;
+  if (npcCodes.has(code)) errors.push(`Duplicate NPC agency code in 007: ${code}`);
+  npcCodes.add(code);
+  npcBlocs[bloc] += 1;
+}
+
+for (const [bloc, count] of Object.entries(npcBlocs)) {
+  if (count < 4) errors.push(`007 seeds only ${count} NPC agencies for bloc ${bloc} (expected at least 4).`);
+}
+if (npcRows.length < 12) errors.push(`007 seeds only ${npcRows.length} NPC agencies (expected at least 12).`);
+notes.push(`NPC agencies: ${npcCodes.size} (western ${npcBlocs.western}, eastern ${npcBlocs.eastern}, neutral ${npcBlocs.neutral})`);
 
 const snapshotPath = path.join(root, 'supabase', 'schema.sql');
 if (!fs.existsSync(snapshotPath)) {

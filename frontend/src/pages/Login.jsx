@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
+import { saveSession } from '../lib/session'
 import './Auth.css'
 
 export default function Login({ onLogin }) {
@@ -28,7 +29,7 @@ export default function Login({ onLogin }) {
       }
 
       localStorage.setItem('afm_user', JSON.stringify(data.user))
-      localStorage.setItem('afm_session', JSON.stringify(data.session))
+      saveSession(data.session)
       onLogin(data.user)
       navigate('/dashboard')
     } catch (err) {

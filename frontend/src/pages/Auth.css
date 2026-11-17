@@ -2,7 +2,7 @@
 .auth-screen {
   min-height: 100vh;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 16px;
   background-color: #0b0c0e;
@@ -34,6 +34,14 @@
   border-radius: 0;
   appearance: none;
   -webkit-appearance: none;
+}
+
+.auth-screen select {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+  border-radius: 0;
+  color-scheme: dark;
 }
 
 :where(.auth-screen) button {
@@ -78,6 +86,7 @@
 .auth-panel {
   width: 100%;
   max-width: 380px;
+  margin-block: auto;
   border: 1px solid #23272f;
   background-color: #121417;
 }
@@ -175,12 +184,60 @@
   text-transform: none;
 }
 
+.auth-field select {
+  height: 36px;
+  width: 100%;
+  border: 1px solid #23272f;
+  background-color: #0b0c0e;
+  padding: 0 10px;
+  color: #f8fafc;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.auth-field select option {
+  background-color: #121417;
+  color: #f8fafc;
+}
+
 .auth-field input::placeholder {
   color: #9ca3af;
 }
 
-.auth-field input:focus {
+.auth-field input:focus,
+.auth-field select:focus {
   border-color: #f5a623;
+}
+
+.auth-hint {
+  color: #9ca3af;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  line-height: 1.4;
+  text-transform: none;
+}
+
+.auth-section {
+  margin-top: 4px;
+  border-top: 1px solid #23272f;
+  padding-top: 10px;
+  color: #f8fafc;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.auth-section p {
+  margin-top: 2px;
+  color: #9ca3af;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
 
 .auth-submit {
