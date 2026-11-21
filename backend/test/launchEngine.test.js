@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createFakeSupabase } = require('../test-support/fakeSupabase');
+const { economyRpc } = require('../test-support/economyRpc');
 const { gameDaysToRealMs } = require('../src/services/gameClock');
 const {
   planLaunchSchedule,
@@ -139,7 +140,8 @@ test('LAUNCH_IGNITION resolves the mission deterministically and applies stats o
 });
 
 test('ORBIT_OPERATIONS_COMPLETE closes an orbital mission once', async () => {
-  const { database, client } = createFakeSupabase(createDatabase());
+  const database = createDatabase();
+  const { client } = createFakeSupabase(database, { rpc: economyRpc(database) });
 
   await handleLaunchIgnition(client, launchEvent);
   const orbitEvent = database.scheduled_events[0];
@@ -150,9 +152,10 @@ test('ORBIT_OPERATIONS_COMPLETE closes an orbital mission once', async () => {
   assert.equal(replay.already_completed, true);
   assert.equal(database.missions[0].status, 'COMPLETED');
   assert.equal(database.missions[0].result, 'success');
-  assert.equal(database.logs.length, 2);
-  assert.equal(database.logs[1].event_type, 'MISSION_COMPLETED');
-  assert.equal(database.logs[1].data.event_id, orbitEvent.id);
+  assert.equal(database.logs.length, 3);
+  assert.equal(database.logs[1].event_type, 'MISSION_REWARDED');
+  assert.equal(database.logs[2].event_type, 'MISSION_COMPLETED');
+  assert.equal(database.logs[2].data.event_id, orbitEvent.id);
 });
 
 test('LAUNCH_IGNITION is idempotent after completion', async () => {

@@ -6,6 +6,7 @@ import Engineering from './Engineering'
 import Tracking from './Tracking'
 import Relations from './Relations'
 import Calendar from './Calendar'
+import Economy from './Economy'
 import LaunchGlobe from '../components/LaunchGlobe'
 import OnboardingPanel from '../components/OnboardingPanel'
 import TutorialPanel from '../components/TutorialPanel'
@@ -530,6 +531,11 @@ export default function Dashboard({ user }) {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  const openEconomy = () => {
+    setView('economy')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   const handleLogout = () => {
     clearSession()
     navigate('/login')
@@ -616,6 +622,7 @@ export default function Dashboard({ user }) {
           <nav className="flex items-center gap-0.5 overflow-x-auto custom-scroll ml-auto self-stretch">
             {navButton(view === 'flight', openFlight, 'rocket_launch', 'Flight')}
             {navButton(view === 'tracking', openTracking, 'satellite_alt', 'Tracking')}
+            {navButton(view === 'economy', openEconomy, 'payments', 'Contracts')}
             {navButton(view === 'calendar', openCalendar, 'calendar_month', 'Calendar')}
             {navButton(view === 'relations', openRelations, null, 'Relations')}
             {navButton(
@@ -833,6 +840,15 @@ export default function Dashboard({ user }) {
           />
         ) : view === 'calendar' ? (
           <Calendar apiRequest={apiRequest} />
+        ) : view === 'economy' ? (
+          <Economy
+            agencyId={agencyId}
+            agencyName={agencyName}
+            apiRequest={apiRequest}
+            vehicles={vehicles}
+            onRefresh={() => loadDashboard({ silent: true })}
+            notify={setNotice}
+          />
         ) : view === 'relations' ? (
           <Relations
             agencyId={agencyId}

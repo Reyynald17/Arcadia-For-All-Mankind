@@ -68,6 +68,7 @@ app.use('/api/orbit', require('./routes/orbit')(supabase));
 app.use('/api/dashboard', require('./routes/dashboard')(supabase));
 app.use('/api/diplomacy', require('./routes/diplomacy')(supabase));
 app.use('/api/calendar', require('./routes/calendar')(supabase));
+app.use('/api/economy', require('./routes/economy')(supabase));
 app.use('/api/gm', require('./routes/gm')(supabase));
 
 // Health check

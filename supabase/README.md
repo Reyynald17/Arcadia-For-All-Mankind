@@ -8,6 +8,12 @@ Canonical schema changes are versioned in `migrations/`:
 2. `002_rls.sql` - read-only client policies; all writes stay behind the backend service role.
 3. `003_seed_tech.sql` - Era I-IV starter tech catalog.
 4. `004_seed_stations.sql` - ground and ship tracking network.
+5. `005_diplomacy.sql` - relations, proposals, agreements, saturation, and NPC agencies.
+6. `006_diplomacy_rls.sql` - diplomacy RLS and read-own policies.
+7. `007_seed_npc_diplomacy.sql` - 18 NPC agencies across the three blocs.
+8. `008_economy.sql` - contracts, one-time grants, mission rewards, and the mission queue.
+9. `009_economy_rls.sql` - economy RLS and read-own policies.
+10. `010_contract_mission_link.sql` - links completed contracts to their mission and backfills existing rows.
 
 `schema.sql` is generated from those files by `npm run db:schema`. Do not edit it by hand.
 
@@ -15,13 +21,13 @@ Canonical schema changes are versioned in `migrations/`:
 
 Open the Supabase SQL Editor and run `schema.sql`. It includes the schema, policies, tech catalog, and station seed, and it is safe to re-run.
 
-Alternatively, apply `migrations/001` through `004` in order.
+Alternatively, apply `migrations/001` through `010` in order.
 
 ## Existing Shared Project
 
 Migrations are additive and preserve the legacy AP/RP/SI/IPI columns while the Phase 1 backend cutover is pending.
 
-Do not apply them to a shared production project without owner approval. Apply `001` through `004` in order, then run the legacy backfill:
+Do not apply them to a shared production project without owner approval. Apply `001` through `010` in order, then run the legacy backfill:
 
 ```bash
 npm run db:backfill

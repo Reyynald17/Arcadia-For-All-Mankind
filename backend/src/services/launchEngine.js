@@ -5,34 +5,25 @@ const {
   planOrbit,
   orbitOperationsGameDays,
 } = require('./orbitalEngine');
+const {
+  ROLLOUT_MIN_GAME_DAYS,
+  ROLLOUT_MAX_GAME_DAYS,
+  COUNTDOWN_GAME_DAYS,
+  ACTIVE_MISSION_STATUSES,
+  planLaunchSchedule,
+} = require('./missionPlan');
+const { settleMissionRewards } = require('./economyEngine');
+const {
+  completeQueueItem,
+  promoteNextMission,
+} = require('./missionQueue');
 
-const ROLLOUT_MIN_GAME_DAYS = 45;
-const ROLLOUT_MAX_GAME_DAYS = 60;
-const COUNTDOWN_GAME_DAYS = 1;
-const ACTIVE_MISSION_STATUSES = ['PLANNED', 'ROLLOUT', 'COUNTDOWN', 'ASCENT'];
 const RESOLVED_MISSION_STATUSES = new Set(['ORBIT', 'COMPLETED', 'FAILED', 'ABORTED']);
 const TERMINAL_MISSION_STATUSES = new Set(['COMPLETED', 'FAILED', 'ABORTED']);
 
 function eventTime(event) {
   const date = event?.execute_at ? new Date(event.execute_at) : new Date();
   return Number.isFinite(date.getTime()) ? date.toISOString() : new Date().toISOString();
-}
-
-function planLaunchSchedule({ missionSeed, multiplier, now = new Date() }) {
-  const rng = createSeededRng(`rollout:${missionSeed}`);
-  const rolloutGameDays = Math.round(
-    ROLLOUT_MIN_GAME_DAYS + rng() * (ROLLOUT_MAX_GAME_DAYS - ROLLOUT_MIN_GAME_DAYS),
-  );
-  const totalGameDays = rolloutGameDays + COUNTDOWN_GAME_DAYS;
-  const rolloutMs = gameDaysToRealMs(rolloutGameDays, multiplier);
-  const launchMs = gameDaysToRealMs(totalGameDays, multiplier);
-
-  return {
-    rolloutGameDays,
-    countdownGameDays: COUNTDOWN_GAME_DAYS,
-    rolloutCompletesAt: new Date(now.getTime() + rolloutMs).toISOString(),
-    scheduledLaunchAt: new Date(now.getTime() + launchMs).toISOString(),
-  };
 }
 
 async function ensureEventLog(supabase, mission, event, eventType, description, extra = {}) {
@@ -338,6 +329,12 @@ async function handleLaunchIgnition(supabase, event) {
     },
   );
 
+  let queuePromotion = null;
+  if (!simulation.success) {
+    await completeQueueItem(supabase, missionId, 'FAILED', 'Launch failure');
+    queuePromotion = await promoteNextMission(supabase, mission.agency_id);
+  }
+
   return {
     mission_id: missionId,
     success: simulation.success,
@@ -348,6 +345,7 @@ async function handleLaunchIgnition(supabase, event) {
     orbit_completes_at: orbitCompletesAt,
     completed_at: completedAt,
     already_completed: false,
+    queue_promotion: queuePromotion,
   };
 }
 
@@ -391,6 +389,14 @@ async function handleOrbitOperationsComplete(supabase, event) {
     }
   }
 
+  const completedMission = {
+    ...mission,
+    status: 'COMPLETED',
+    result: 'success',
+    completed_at: completedAt,
+  };
+  const rewards = await settleMissionRewards(supabase, completedMission, { completedAt });
+
   await ensureEventLog(
     supabase,
     mission,
@@ -404,14 +410,20 @@ async function handleOrbitOperationsComplete(supabase, event) {
       orbit: mission.outcome?.orbit || null,
       orbit_operations_game_days: event.payload?.orbit_game_days ?? null,
       completed_at: completedAt,
+      rewards,
     },
   );
+
+  await completeQueueItem(supabase, missionId, 'COMPLETED');
+  const queuePromotion = await promoteNextMission(supabase, mission.agency_id);
 
   return {
     mission_id: missionId,
     status: 'COMPLETED',
     completed_at: completedAt,
     already_completed: alreadyCompleted,
+    rewards,
+    queue_promotion: queuePromotion,
   };
 }
 

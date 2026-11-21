@@ -13,6 +13,9 @@ const expectedFiles = [
   '005_diplomacy.sql',
   '006_diplomacy_rls.sql',
   '007_seed_npc_diplomacy.sql',
+  '008_economy.sql',
+  '009_economy_rls.sql',
+  '010_contract_mission_link.sql',
 ];
 const requiredTables = [
   'seasons',
@@ -288,6 +291,47 @@ for (const [bloc, count] of Object.entries(npcBlocs)) {
 }
 if (npcRows.length < 12) errors.push(`007 seeds only ${npcRows.length} NPC agencies (expected at least 12).`);
 notes.push(`NPC agencies: ${npcCodes.size} (western ${npcBlocs.western}, eastern ${npcBlocs.eastern}, neutral ${npcBlocs.neutral})`);
+
+const economyTables = [
+  'agency_contracts',
+  'agency_grants',
+  'mission_rewards',
+  'mission_queue',
+];
+
+for (const table of economyTables) {
+  if (!new RegExp(`create\\s+table\\s+if\\s+not\\s+exists\\s+${table}\\b`, 'i').test(sql['008_economy.sql'])) {
+    errors.push(`008 is missing CREATE TABLE IF NOT EXISTS ${table}.`);
+  }
+  if (!new RegExp(`alter\\s+table\\s+${table}\\s+enable\\s+row\\s+level\\s+security`, 'i').test(sql['009_economy_rls.sql'])) {
+    errors.push(`009 is missing RLS enablement for ${table}.`);
+  }
+  if (!new RegExp(`create\\s+policy\\s+${table}_read_own`, 'i').test(sql['009_economy_rls.sql'])) {
+    errors.push(`009 is missing the read-own policy for ${table}.`);
+  }
+}
+
+for (const column of ['contract_id', 'queue_id']) {
+  if (!new RegExp(`add\\s+column\\s+if\\s+not\\s+exists\\s+${column}\\b`, 'i').test(sql['008_economy.sql'])) {
+    errors.push(`008 is missing missions.${column}.`);
+  }
+}
+
+for (const fn of ['settle_mission_rewards', 'claim_agency_grant']) {
+  if (!new RegExp(`create\\s+or\\s+replace\\s+function\\s+${fn}\\s*\\(`, 'i').test(sql['008_economy.sql'])) {
+    errors.push(`008 is missing function ${fn}.`);
+  }
+}
+
+if (!/create\s+or\s+replace\s+function\s+settle_mission_rewards\s*\(/i.test(sql['010_contract_mission_link.sql'])) {
+  errors.push('010 is missing the settle_mission_rewards replacement.');
+}
+if (!/mission_id\s*=\s*p_mission_id/i.test(sql['010_contract_mission_link.sql'])) {
+  errors.push('010 does not link agency_contracts.mission_id during settlement.');
+}
+if (!/update\s+agency_contracts/i.test(sql['010_contract_mission_link.sql'])) {
+  errors.push('010 is missing the agency_contracts backfill.');
+}
 
 const snapshotPath = path.join(root, 'supabase', 'schema.sql');
 if (!fs.existsSync(snapshotPath)) {
