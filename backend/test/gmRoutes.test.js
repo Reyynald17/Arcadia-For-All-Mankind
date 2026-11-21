@@ -35,7 +35,9 @@ function createDatabase() {
       id: 'vehicle-1',
       agency_id: 'agency-1',
       name: 'Sonda Qoder I',
+      type: 'sounding-rocket',
       status: 'manufacturing',
+      reliability: 70,
     }],
     missions: [],
     scheduled_events: [{
@@ -228,6 +230,139 @@ test('GM complete-now mode flushes every event in scope', async () => {
       const event = database.scheduled_events.find((candidate) => candidate.id === id);
       assert.ok(new Date(event.execute_at) <= FIXED_NOW, `${id} should be due`);
     }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('GM reliability override validates input, updates the vehicle, and audits the change', async () => {
+  const { database, client } = createFakeSupabase(createDatabase());
+  const { server, baseUrl } = await startServer(client);
+
+  try {
+    const response = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/reliability`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ reliability: 84, reason: 'playtest tune' }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.previous_reliability, 70);
+    assert.equal(body.reliability, 84);
+    assert.equal(body.changed, true);
+    assert.equal(body.vehicle.reliability, 84);
+    assert.equal(database.vehicles[0].reliability, 84);
+
+    const audit = database.audit_events.find((event) => event.action === 'GM_VEHICLE_RELIABILITY');
+    assert.ok(audit, 'reliability override should be audited');
+    assert.equal(audit.actor_type, 'gm');
+    assert.equal(audit.agency_id, 'agency-1');
+    assert.equal(audit.entity_type, 'vehicle');
+    assert.equal(audit.entity_id, 'vehicle-1');
+    assert.equal(audit.before_data.reliability, 70);
+    assert.equal(audit.after_data.reliability, 84);
+    assert.equal(audit.delta_data.reliability, 14);
+    assert.equal(audit.metadata.reason, 'playtest tune');
+
+    const repeat = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/reliability`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ reliability: 84 }),
+    });
+    const repeatBody = await repeat.json();
+    assert.equal(repeat.status, 200);
+    assert.equal(repeatBody.changed, false);
+    assert.equal(database.audit_events.length, 1, 'no-op overrides should not add audit rows');
+
+    for (const invalid of [101, -1, 55.5, 'abc', null]) {
+      const bad = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/reliability`, {
+        method: 'POST',
+        headers: gmHeaders(),
+        body: JSON.stringify({ reliability: invalid }),
+      });
+      assert.equal(bad.status, 400, `reliability ${invalid} should be rejected`);
+    }
+
+    const missing = await fetch(`${baseUrl}/api/gm/vehicles/missing/reliability`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ reliability: 50 }),
+    });
+    assert.equal(missing.status, 404);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('GM repair raises reliability, caps at 95, and skips no-op writes', async () => {
+  const { database, client } = createFakeSupabase(createDatabase());
+  const { server, baseUrl } = await startServer(client);
+
+  try {
+    const first = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/repair`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ bonus: 10, reason: 'post-investigation fix' }),
+    });
+    const firstBody = await first.json();
+
+    assert.equal(first.status, 200, JSON.stringify(firstBody));
+    assert.equal(firstBody.previous_reliability, 70);
+    assert.equal(firstBody.reliability, 80);
+    assert.equal(firstBody.applied, 10);
+    assert.equal(firstBody.capped, false);
+    assert.equal(database.vehicles[0].reliability, 80);
+
+    database.vehicles[0].reliability = 92;
+    const capped = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/repair`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({}),
+    });
+    const cappedBody = await capped.json();
+
+    assert.equal(capped.status, 200);
+    assert.equal(cappedBody.previous_reliability, 92);
+    assert.equal(cappedBody.reliability, 95);
+    assert.equal(cappedBody.applied, 3);
+    assert.equal(cappedBody.capped, true);
+
+    const noop = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/repair`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ bonus: 5 }),
+    });
+    const noopBody = await noop.json();
+
+    assert.equal(noop.status, 200);
+    assert.equal(noopBody.applied, 0);
+    assert.equal(noopBody.reliability, 95);
+    assert.equal(database.vehicles[0].reliability, 95);
+
+    const repairs = database.audit_events.filter((event) => event.action === 'GM_VEHICLE_REPAIRED');
+    assert.equal(repairs.length, 2, 'only applied repairs should be audited');
+    assert.equal(repairs[0].delta_data.reliability, 10);
+    assert.equal(repairs[0].metadata.reason, 'post-investigation fix');
+    assert.equal(repairs[1].delta_data.reliability, 3);
+    assert.equal(repairs[1].metadata.requested_bonus, 5);
+    assert.equal(repairs[1].metadata.cap, 95);
+
+    for (const invalid of [0, 21, 2.5, 'abc']) {
+      const bad = await fetch(`${baseUrl}/api/gm/vehicles/vehicle-1/repair`, {
+        method: 'POST',
+        headers: gmHeaders(),
+        body: JSON.stringify({ bonus: invalid }),
+      });
+      assert.equal(bad.status, 400, `bonus ${invalid} should be rejected`);
+    }
+
+    const missing = await fetch(`${baseUrl}/api/gm/vehicles/missing/repair`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ bonus: 5 }),
+    });
+    assert.equal(missing.status, 404);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

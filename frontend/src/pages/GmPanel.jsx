@@ -10,6 +10,8 @@ const PRESETS = [1, 7, 30, 90, 365]
 const AUDIT_ACTION_LABELS = {
   GM_UPDATE_STATS: 'GM ubah stats',
   GM_ADVANCE_TIME: 'GM percepat waktu',
+  GM_VEHICLE_RELIABILITY: 'GM set reliability',
+  GM_VEHICLE_REPAIRED: 'GM repair vehicle',
   RESEARCH_STARTED: 'Riset dimulai',
   STATIC_FIRE_STARTED: 'Static fire dijadwalkan',
   PRODUCTION_STARTED: 'Produksi dimulai',
@@ -97,6 +99,9 @@ function formatAuditDelta(delta) {
   if (Number(delta.events_shifted)) {
     parts.push(`${delta.events_shifted} event`)
   }
+  if (Number(delta.reliability)) {
+    parts.push(`${delta.reliability > 0 ? '+' : ''}${delta.reliability} REL`)
+  }
   return parts.join(' // ')
 }
 
@@ -166,6 +171,9 @@ export default function GmPanel() {
   const [auditEvents, setAuditEvents] = useState([])
   const [auditLoading, setAuditLoading] = useState(false)
   const [auditError, setAuditError] = useState('')
+  const [toolVehicleId, setToolVehicleId] = useState('')
+  const [toolReliability, setToolReliability] = useState('')
+  const [toolBonus, setToolBonus] = useState('5')
 
   const describeError = (err) => {
     if (err?.code === 'GM_DISABLED') {
@@ -340,6 +348,72 @@ export default function GmPanel() {
     runAdvance({ mode: 'now' })
   }
 
+  const runVehicleTool = async (kind) => {
+    if (!key || !toolVehicleId || busy) return
+    setError('')
+    setNotice('')
+
+    const body = {}
+    if (kind === 'reliability') {
+      if (String(toolReliability).trim() === '') {
+        setError('Isi reliability 0–100 dulu.')
+        return
+      }
+      const reliability = Number(toolReliability)
+      if (!Number.isInteger(reliability) || reliability < 0 || reliability > 100) {
+        setError('Reliability harus bilangan bulat 0–100.')
+        return
+      }
+      body.reliability = reliability
+    } else {
+      const bonus = Number(toolBonus)
+      if (!Number.isInteger(bonus) || bonus < 1 || bonus > 20) {
+        setError('Bonus repair harus bilangan bulat 1–20.')
+        return
+      }
+      body.bonus = bonus
+    }
+
+    setBusy(true)
+    try {
+      const result = await gmRequest(
+        `/gm/vehicles/${encodeURIComponent(toolVehicleId)}/${kind === 'reliability' ? 'reliability' : 'repair'}`,
+        { key, method: 'POST', body },
+      )
+      const label = toUpper(result.vehicle?.name || toolVehicleId)
+      if (kind === 'reliability') {
+        setNotice(
+          result.changed
+            ? `${label}: reliability ${result.previous_reliability} → ${result.reliability}.`
+            : `${label}: reliability sudah ${result.reliability}.`,
+        )
+        setToolReliability('')
+      } else if (result.applied > 0) {
+        setNotice(
+          `${label}: repair +${result.applied} → ${result.reliability}${result.capped ? ' (cap 95)' : ''}.`,
+        )
+      } else {
+        setNotice(`${label}: reliability sudah di cap ${result.reliability}.`)
+      }
+      await loadState(key, selectedId)
+      await loadAudit(key, selectedId)
+    } catch (err) {
+      setError(describeError(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const submitReliability = (event) => {
+    event.preventDefault()
+    runVehicleTool('reliability')
+  }
+
+  const submitRepair = (event) => {
+    event.preventDefault()
+    runVehicleTool('repair')
+  }
+
   const agency = agencyState?.agency || null
   const season = agencyState?.season || null
   const timeScale = Number(agencyState?.timeScale) || 52.142857
@@ -349,6 +423,12 @@ export default function GmPanel() {
   const diplomacyEvents = events.filter((event) => !operationTypes.has(event.event_type))
   const vehicles = agencyState?.vehicles || []
   const missions = agencyState?.missions || []
+
+  useEffect(() => {
+    setToolVehicleId((prev) => (
+      vehicles.some((vehicle) => vehicle.id === prev) ? prev : (vehicles[0]?.id || '')
+    ))
+  }, [vehicles])
 
   if (!key || editingKey) {
     return (
@@ -702,7 +782,9 @@ export default function GmPanel() {
                 vehicles.map((vehicle) => (
                   <div key={vehicle.id} className="px-3 py-2 flex items-center justify-between gap-3 text-[10px]">
                     <span className="text-neutral-100 truncate">{toUpper(vehicle.name)}</span>
-                    <span className="text-neutral-400 uppercase whitespace-nowrap">{vehicle.status}</span>
+                    <span className="text-neutral-400 uppercase whitespace-nowrap">
+                      REL {vehicle.reliability ?? '—'} // {vehicle.status}
+                    </span>
                   </div>
                 ))
               )}
@@ -730,6 +812,89 @@ export default function GmPanel() {
             </div>
           </section>
         </div>
+
+        <section className="border border-carbon-border bg-carbon-surface">
+          <PanelHead title="Vehicle Reliability Tools" right="GM WRITE" />
+          <div className="p-3 space-y-3">
+            <label className="block">
+              <span className="text-[9px] uppercase tracking-widest text-neutral-400">Vehicle</span>
+              <select
+                value={toolVehicleId}
+                onChange={(event) => setToolVehicleId(event.target.value)}
+                disabled={vehicles.length === 0}
+                className="mt-1 w-full border border-carbon-border bg-carbon-bg px-2 py-1.5 text-xs text-neutral-100 disabled:opacity-50"
+              >
+                {vehicles.length === 0 ? <option value="">Tidak ada vehicle</option> : null}
+                {vehicles.map((vehicle) => (
+                  <option key={vehicle.id} value={vehicle.id}>
+                    {toUpper(vehicle.name)} // REL {vehicle.reliability ?? '—'} // {toUpper(vehicle.status)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <form onSubmit={submitReliability} className="border border-carbon-border bg-carbon-bg/60 p-2.5 space-y-2">
+                <div className="text-[9px] uppercase tracking-widest text-neutral-300">Set reliability</div>
+                <div className="flex items-end gap-2">
+                  <label className="flex-1">
+                    <span className="text-[9px] uppercase tracking-widest text-neutral-400">Nilai 0–100</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="1"
+                      value={toolReliability}
+                      onChange={(event) => setToolReliability(event.target.value)}
+                      placeholder="cth. 85"
+                      className="mt-1 w-full border border-carbon-border bg-carbon-bg px-2 py-1.5 text-xs text-neutral-100 placeholder:text-neutral-500"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={busy || !toolVehicleId}
+                    className="bg-flight-amber hover:bg-flight-amber-dim disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-black bezier-fast"
+                  >
+                    Set
+                  </button>
+                </div>
+                <p className="text-[9px] leading-relaxed text-neutral-400">
+                  Override langsung kolom <code className="text-flight-amber">vehicles.reliability</code>.
+                  Perubahan dicatat di audit trail.
+                </p>
+              </form>
+
+              <form onSubmit={submitRepair} className="border border-carbon-border bg-carbon-bg/60 p-2.5 space-y-2">
+                <div className="text-[9px] uppercase tracking-widest text-neutral-300">Repair pasca-investigasi</div>
+                <div className="flex items-end gap-2">
+                  <label className="flex-1">
+                    <span className="text-[9px] uppercase tracking-widest text-neutral-400">Bonus reliability 1–20</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      step="1"
+                      value={toolBonus}
+                      onChange={(event) => setToolBonus(event.target.value)}
+                      className="mt-1 w-full border border-carbon-border bg-carbon-bg px-2 py-1.5 text-xs text-neutral-100"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={busy || !toolVehicleId}
+                    className="border border-flight-amber/50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-flight-amber hover:bg-flight-amber/10 disabled:opacity-50 disabled:cursor-not-allowed bezier-fast"
+                  >
+                    Repair
+                  </button>
+                </div>
+                <p className="text-[9px] leading-relaxed text-neutral-400">
+                  Menambah reliability tanpa biaya funding, berhenti di cap 95. Untuk menutup
+                  investigasi yang macet atau menyiapkan playtest berikutnya.
+                </p>
+              </form>
+            </div>
+          </div>
+        </section>
 
         <section className="border border-carbon-border bg-carbon-surface">
           <PanelHead

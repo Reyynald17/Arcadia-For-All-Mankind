@@ -508,6 +508,7 @@ async function handleInvestigationComplete(supabase, event) {
 }
 
 module.exports = {
+  MAX_RELIABILITY,
   INVESTIGATION_GAME_DAYS,
   INVESTIGATION_COST_USD,
   DEFAULT_INVESTIGATION_COST_USD,
