@@ -17,6 +17,13 @@ const AUDIT_ACTION_LABELS = {
   GRANT_CLAIMED: 'Grant diklaim',
   MISSION_REWARDED: 'Reward misi dibayar',
   MISSION_STATS_UPDATE: 'Stats misi diterapkan',
+  MISSION_FAILED: 'Misi gagal',
+  MISSION_CREW_RESOLVED: 'Crew misi diselesaikan',
+  ANNUAL_BUDGET_SETTLED: 'Anggaran tahunan diselesaikan',
+  CREW_RECRUITED: 'Crew direkrut',
+  CREW_ACTIVATED: 'Crew siap bertugas',
+  INVESTIGATION_STARTED: 'Investigasi dimulai',
+  INVESTIGATION_COMPLETED: 'Investigasi selesai',
   DIPLOMACY_FUNDING_DEBIT: 'Biaya diplomasi',
   DIPLOMACY_FUNDING_REFUND: 'Refund diplomasi',
 }
@@ -31,6 +38,9 @@ const EVENT_LABELS = {
   DIPLOMACY_PROPOSAL_EXPIRED: 'Proposal diplomasi kedaluwarsa',
   DIPLOMACY_AGREEMENT_EXPIRED: 'Agreement diplomasi berakhir',
   DIPLOMACY_NPC_TICK: 'NPC diplomacy tick',
+  BUDGET_REVIEW: 'Review anggaran tahunan',
+  CREW_TRAINING_COMPLETE: 'Training crew selesai',
+  INVESTIGATION_COMPLETE: 'Investigasi selesai',
 }
 
 const pad = (value) => String(value).padStart(2, '0')

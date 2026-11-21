@@ -21,6 +21,8 @@ const {
   handleBudgetReview,
   ensureBudgetSchedules,
 } = require('./services/budgetEngine');
+const { handleCrewTrainingComplete } = require('./services/crewEngine');
+const { handleInvestigationComplete } = require('./services/investigationEngine');
 
 const app = express();
 app.disable('x-powered-by');
@@ -57,6 +59,8 @@ const eventQueue = createEventQueue({
     DIPLOMACY_AGREEMENT_EXPIRED: (event) => handleAgreementExpired(supabase, event),
     DIPLOMACY_NPC_TICK: (event) => handleNpcTick(supabase, event),
     BUDGET_REVIEW: (event) => handleBudgetReview(supabase, event),
+    CREW_TRAINING_COMPLETE: (event) => handleCrewTrainingComplete(supabase, event),
+    INVESTIGATION_COMPLETE: (event) => handleInvestigationComplete(supabase, event),
   },
   intervalMs: Number(process.env.EVENT_QUEUE_INTERVAL_MS) || 5000,
   batchSize: Number(process.env.EVENT_QUEUE_BATCH_SIZE) || 10,
@@ -74,6 +78,7 @@ app.use('/api/dashboard', require('./routes/dashboard')(supabase));
 app.use('/api/diplomacy', require('./routes/diplomacy')(supabase));
 app.use('/api/calendar', require('./routes/calendar')(supabase));
 app.use('/api/economy', require('./routes/economy')(supabase));
+app.use('/api/personnel', require('./routes/personnel')(supabase));
 app.use('/api/gm', require('./routes/gm')(supabase));
 
 // Health check

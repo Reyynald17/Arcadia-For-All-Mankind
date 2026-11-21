@@ -4,6 +4,7 @@ const {
   loadActiveSeason,
 } = require('./gameClock');
 const { recordAuditEvent } = require('./auditLog');
+const { calculateCrewPayroll, loadAgencyCrew } = require('./crewEngine');
 
 const POLICY_VERSION = 1;
 
@@ -80,17 +81,21 @@ function calculateAnnualAppropriation(agency) {
   };
 }
 
-function calculateOperatingCost(agency) {
+function calculateOperatingCost(agency, crewRows = []) {
   const policy = BUDGET_POLICY.operating;
   const engineers = Math.max(0, Math.floor(Number(agency?.total_engineers) || 0));
   const personnelUsd = engineers * policy.engineer_salary_usd;
+  const crewPayroll = calculateCrewPayroll(crewRows);
 
   return {
     headquarters_usd: policy.headquarters_usd,
     engineers,
     engineer_salary_usd: policy.engineer_salary_usd,
     personnel_usd: personnelUsd,
-    total_usd: policy.headquarters_usd + personnelUsd,
+    crew_count: crewPayroll.crew_count,
+    crew_payroll_usd: crewPayroll.total_usd,
+    crew_by_role: crewPayroll.by_role,
+    total_usd: policy.headquarters_usd + personnelUsd + crewPayroll.total_usd,
   };
 }
 
@@ -125,9 +130,9 @@ function calculateVehicleUpkeep(vehicles = []) {
   };
 }
 
-function calculateAnnualBudget(agency, vehicles = []) {
+function calculateAnnualBudget(agency, vehicles = [], crewRows = []) {
   const appropriation = calculateAnnualAppropriation(agency);
-  const operating = calculateOperatingCost(agency);
+  const operating = calculateOperatingCost(agency, crewRows);
   const upkeep = calculateVehicleUpkeep(vehicles);
   const totalCostUsd = operating.total_usd + upkeep.total_usd;
 
@@ -304,7 +309,15 @@ async function handleBudgetReview(supabase, event, options = {}) {
 
   if (vehicleError) throw new Error(`budget vehicles: ${vehicleError.message}`);
 
-  const budget = calculateAnnualBudget(agency, vehicles || []);
+  let crewRows = [];
+  try {
+    const crew = await loadAgencyCrew(supabase, agencyId);
+    crewRows = crew.rows;
+  } catch (error) {
+    console.error(`budget crew: ${error.message}`);
+  }
+
+  const budget = calculateAnnualBudget(agency, vehicles || [], crewRows);
   const gameDate = event?.payload?.game_date || `${cycleYear}-01-01`;
 
   const { data: settlement, error: rpcError } = await supabase.rpc('settle_annual_budget', {
@@ -423,7 +436,21 @@ async function getBudgetOverview(supabase, agency, options = {}) {
     vehicleRows = data || [];
   }
 
-  const projection = calculateAnnualBudget(agency, vehicleRows);
+  let crewRows = options.crew;
+  let crewMigrationRequired = false;
+  let crewError = null;
+  if (!crewRows) {
+    try {
+      const crew = await loadAgencyCrew(supabase, agency.id);
+      crewRows = crew.rows;
+      crewMigrationRequired = crew.migration_required;
+    } catch (error) {
+      crewError = error.message;
+      crewRows = [];
+    }
+  }
+
+  const projection = calculateAnnualBudget(agency, vehicleRows, crewRows || []);
   let next = null;
   let seasonError = null;
   try {
@@ -467,6 +494,8 @@ async function getBudgetOverview(supabase, agency, options = {}) {
     history_error: historyError,
     season_error: seasonError,
     vehicle_error: vehicleError,
+    crew_migration_required: crewMigrationRequired,
+    crew_error: crewError,
   };
 }
 

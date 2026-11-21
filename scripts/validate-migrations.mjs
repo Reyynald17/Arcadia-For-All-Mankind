@@ -20,6 +20,7 @@ const expectedFiles = [
   '012_audit_append_only.sql',
   '013_mission_feasibility.sql',
   '014_annual_budget.sql',
+  '015_personnel_investigations.sql',
 ];
 const requiredTables = [
   'seasons',
@@ -433,6 +434,59 @@ if (!/create\s+or\s+replace\s+function\s+settle_annual_budget\s*\(/i.test(sql['0
 }
 if (!/grant\s+execute\s+on\s+function\s+settle_annual_budget/i.test(sql['014_annual_budget.sql'])) {
   errors.push('014 is missing the settle_annual_budget service_role grant.');
+}
+
+const personnelTables = [
+  'agency_crew',
+  'mission_crew',
+  'mission_investigations',
+];
+
+for (const table of personnelTables) {
+  if (!new RegExp(`create\\s+table\\s+if\\s+not\\s+exists\\s+${table}\\b`, 'i').test(sql['015_personnel_investigations.sql'])) {
+    errors.push(`015 is missing CREATE TABLE IF NOT EXISTS ${table}.`);
+  }
+  if (!new RegExp(`alter\\s+table\\s+${table}\\s+enable\\s+row\\s+level\\s+security`, 'i').test(sql['015_personnel_investigations.sql'])) {
+    errors.push(`015 is missing RLS enablement for ${table}.`);
+  }
+  if (!new RegExp(`create\\s+policy\\s+${table}_read_own`, 'i').test(sql['015_personnel_investigations.sql'])) {
+    errors.push(`015 is missing the read-own policy for ${table}.`);
+  }
+}
+
+for (const column of [
+  'role',
+  'experience',
+  'missions_flown',
+  'salary_usd',
+  'training_cost_usd',
+  'ready_at',
+]) {
+  if (!new RegExp(`\\b${column}\\b`, 'i').test(sql['015_personnel_investigations.sql'])) {
+    errors.push(`015 is missing agency_crew.${column}.`);
+  }
+}
+for (const column of [
+  'crew_id',
+  'outcome',
+]) {
+  if (!new RegExp(`\\b${column}\\b`, 'i').test(sql['015_personnel_investigations.sql'])) {
+    errors.push(`015 is missing mission_crew.${column}.`);
+  }
+}
+for (const column of [
+  'stage',
+  'cause',
+  'findings',
+  'reliability_bonus',
+  'completes_at',
+]) {
+  if (!new RegExp(`\\b${column}\\b`, 'i').test(sql['015_personnel_investigations.sql'])) {
+    errors.push(`015 is missing mission_investigations.${column}.`);
+  }
+}
+if (!/unique\s*\(\s*mission_id\s*\)/i.test(sql['015_personnel_investigations.sql'])) {
+  errors.push('015 is missing the one-investigation-per-mission guard.');
 }
 
 const snapshotPath = path.join(root, 'supabase', 'schema.sql');

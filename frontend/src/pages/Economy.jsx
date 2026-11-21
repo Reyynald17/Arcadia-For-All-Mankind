@@ -23,6 +23,26 @@ const STATUS_TONE = {
   AVAILABLE: 'text-neutral-300',
 }
 
+const CREW_STATUS_TONE = {
+  ACTIVE: 'text-emerald-400',
+  TRAINING: 'text-flight-amber',
+  INJURED: 'text-alert-red',
+  KILLED: 'text-alert-red',
+  RETIRED: 'text-neutral-500',
+}
+
+const INVESTIGATION_TONE = {
+  OPEN: 'text-flight-amber',
+  IN_PROGRESS: 'text-neutral-200',
+  COMPLETED: 'text-emerald-400',
+}
+
+const CREW_ROLE_LABEL = {
+  COMMANDER: 'CDR',
+  PILOT: 'PLT',
+  MISSION_SPECIALIST: 'MS',
+}
+
 const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0)
 const toUpper = (value) => String(value ?? '').toUpperCase()
 
@@ -109,6 +129,9 @@ function BudgetPanel({ budget }) {
           <div className="mt-0.5 text-[9px] uppercase text-neutral-500 leading-snug">
             HQ {formatUsd(operating.headquarters_usd)}
             {' // '}{formatInt(operating.engineers)} ENG @ {formatUsd(operating.engineer_salary_usd)}
+            {num(operating.crew_count) > 0 && (
+              <>{' // '}CREW {formatInt(operating.crew_count)} @ {formatUsd(operating.crew_payroll_usd)}</>
+            )}
           </div>
         </div>
         <div className="px-3 py-2.5 border-b lg:border-b-0 lg:border-r border-carbon-border">
@@ -236,6 +259,8 @@ function FeasibilityPanel({ feasibility, loading, error }) {
             </span>
             <span>
               CREW <b className="text-neutral-200">{feasibility.crew_required}/{feasibility.crew_capacity}</b>
+              {feasibility.crew_available !== null && feasibility.crew_available !== undefined
+                && ` // ROSTER ${feasibility.crew_available}`}
             </span>
             <span className="col-span-2">
               FUND <b className="text-neutral-200">{formatUsd(feasibility.funding_required_usd)}/{formatUsd(feasibility.funding_available_usd)}</b>
@@ -279,6 +304,185 @@ function FeasibilityPanel({ feasibility, loading, error }) {
   )
 }
 
+function PersonnelPanel({ personnel, personnelError, busyKey, onRecruit }) {
+  const [name, setName] = useState('')
+  const [role, setRole] = useState('MISSION_SPECIALIST')
+  const crew = personnel?.crew || []
+  const counts = personnel?.counts || {}
+  const roles = personnel?.roles || []
+  const selectedRole = roles.find((entry) => entry.key === role) || roles[0] || null
+  const migrationRequired = Boolean(personnel?.migration_required)
+
+  const submit = async (event) => {
+    event.preventDefault()
+    const trimmed = name.trim()
+    if (!trimmed) return
+    const ok = await onRecruit(trimmed, role)
+    if (ok) setName('')
+  }
+
+  return (
+    <section className="bg-carbon-surface border border-carbon-border">
+      <PanelHead
+        title="Personnel // Astronaut Corps"
+        right={`${formatInt(counts.active)} ACTIVE / ${formatInt(counts.total)}`}
+      />
+      <div className="p-3 space-y-2.5">
+        {personnelError && (
+          <div className="border border-alert-red/40 bg-alert-red/10 px-2 py-1 text-[9px] uppercase text-alert-red">
+            {toUpper(personnelError)}
+          </div>
+        )}
+        {migrationRequired && (
+          <div className="border border-flight-amber/40 bg-flight-amber/10 px-2 py-1 text-[9px] uppercase text-flight-amber">
+            Roster aktif setelah migration 015 diterapkan.
+          </div>
+        )}
+        <div className="grid grid-cols-3 gap-2 text-[9px] uppercase tracking-wider text-neutral-500 tabular-nums">
+          <span>ACTIVE <b className="text-emerald-400">{formatInt(counts.active)}</b></span>
+          <span>TRAINING <b className="text-flight-amber">{formatInt(counts.training)}</b></span>
+          <span>PAYROLL <b className="text-neutral-200">{formatUsd(personnel?.payroll?.total_usd)}/YR</b></span>
+        </div>
+        <form onSubmit={submit} className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="CREW NAME"
+              maxLength={40}
+              spellCheck={false}
+              autoComplete="off"
+              className="h-8 bg-carbon-bg border border-carbon-border px-2 text-[10px] text-neutral-100 placeholder:text-neutral-500"
+            />
+            <select
+              value={role}
+              onChange={(event) => setRole(event.target.value)}
+              className="h-8 bg-carbon-bg border border-carbon-border px-2 text-[10px] text-neutral-100"
+            >
+              {roles.length === 0 && <option value="MISSION_SPECIALIST">MISSION SPECIALIST</option>}
+              {roles.map((entry) => (
+                <option key={entry.key} value={entry.key}>
+                  {toUpper(entry.label)} // {formatUsd(entry.training_cost_usd)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <button
+            type="submit"
+            disabled={Boolean(busyKey) || !name.trim()}
+            className="w-full border border-flight-amber text-flight-amber hover:bg-flight-amber hover:text-black px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {busyKey === 'recruit'
+              ? 'RECRUITING...'
+              : `Recruit // ${formatUsd(selectedRole?.training_cost_usd)} TRAINING // ${formatInt(personnel?.training_game_days || 12)} GD`}
+          </button>
+        </form>
+        <div className="max-h-[240px] overflow-y-auto custom-scroll divide-y divide-carbon-border border border-carbon-border">
+          {crew.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[10px] uppercase text-neutral-500">
+              Belum ada crew terdaftar
+            </div>
+          ) : (
+            crew.map((member) => (
+              <div key={member.id} className="px-2.5 py-1.5">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[10px] font-bold uppercase text-neutral-100 truncate">
+                    {member.name}
+                  </span>
+                  <span className="text-[9px] text-neutral-500">
+                    {CREW_ROLE_LABEL[member.role] || toUpper(member.role)}
+                  </span>
+                  <span className={`text-[9px] uppercase ${CREW_STATUS_TONE[member.status] || 'text-neutral-400'}`}>
+                    {member.status}
+                  </span>
+                  <span className="ml-auto text-[9px] tabular-nums text-neutral-500">
+                    {formatUsd(member.salary_usd)}/YR
+                  </span>
+                </div>
+                <div className="text-[9px] uppercase tabular-nums text-neutral-500">
+                  EXP {formatInt(member.experience)} // FLIGHTS {formatInt(member.missions_flown)}
+                  {member.status === 'TRAINING' && member.ready_at && ` // READY ${formatTime(member.ready_at)}`}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function InvestigationPanel({ personnel, busyKey, onStart }) {
+  const investigations = personnel?.investigations || []
+  const migrationRequired = Boolean(personnel?.investigations_migration_required)
+
+  return (
+    <section className="bg-carbon-surface border border-carbon-border">
+      <PanelHead title="Mishap Investigations" right={`${investigations.length} RECORD`} />
+      <div className="p-3 space-y-2">
+        {migrationRequired && (
+          <div className="border border-flight-amber/40 bg-flight-amber/10 px-2 py-1 text-[9px] uppercase text-flight-amber">
+            Investigasi aktif setelah migration 015 diterapkan.
+          </div>
+        )}
+        <div className="max-h-[320px] overflow-y-auto custom-scroll divide-y divide-carbon-border border border-carbon-border">
+          {investigations.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[10px] uppercase text-neutral-500">
+              Tidak ada kegagalan tercatat
+            </div>
+          ) : (
+            investigations.map((investigation) => (
+              <div key={investigation.id} className="px-2.5 py-2">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="text-[10px] font-bold uppercase text-neutral-100 truncate">
+                    {investigation.mission_name || investigation.mission_id}
+                  </span>
+                  <span className={`text-[9px] uppercase ${INVESTIGATION_TONE[investigation.status] || 'text-neutral-400'}`}>
+                    {investigation.status}
+                  </span>
+                  {investigation.status === 'OPEN' && (
+                    <button
+                      type="button"
+                      onClick={() => onStart(investigation)}
+                      disabled={Boolean(busyKey)}
+                      className="ml-auto border border-flight-amber/60 px-2 py-0.5 text-[9px] uppercase text-flight-amber hover:bg-flight-amber hover:text-black disabled:opacity-50"
+                    >
+                      {busyKey === `investigation-${investigation.id}`
+                        ? 'STARTING...'
+                        : `Start // ${formatUsd(investigation.cost_usd)}`}
+                    </button>
+                  )}
+                  {investigation.status === 'IN_PROGRESS' && (
+                    <span className="ml-auto text-[9px] uppercase tabular-nums text-neutral-500">
+                      ETA {formatTime(investigation.completes_at)}
+                    </span>
+                  )}
+                  {investigation.status === 'COMPLETED' && (
+                    <span className="ml-auto text-[9px] uppercase tabular-nums text-emerald-400">
+                      +{formatInt(investigation.reliability_bonus)} REL
+                    </span>
+                  )}
+                </div>
+                <div className="text-[9px] uppercase text-neutral-500">
+                  STAGE {toUpper(investigation.stage)} // {formatUsd(investigation.cost_usd)}
+                </div>
+                {investigation.cause && (
+                  <div className="text-[9px] uppercase text-neutral-400">
+                    CAUSE {toUpper(investigation.cause)}
+                  </div>
+                )}
+                {investigation.findings && (
+                  <p className="text-[9px] text-neutral-500 leading-snug mt-0.5">{investigation.findings}</p>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 export default function Economy({
   agencyId,
   agencyName,
@@ -288,6 +492,8 @@ export default function Economy({
   notify,
 }) {
   const [offers, setOffers] = useState(null)
+  const [personnel, setPersonnel] = useState(null)
+  const [personnelError, setPersonnelError] = useState('')
   const [queueState, setQueueState] = useState({ queue: [], activeMission: null })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -314,11 +520,19 @@ export default function Economy({
     setLoading(true)
     setError('')
     try {
-      const [offerData, queueData] = await Promise.all([
+      const [offerData, queueData, personnelData] = await Promise.all([
         apiRequest(`/economy/offers/${agencyId}`),
         apiRequest(`/launch/queue/${agencyId}`),
+        apiRequest(`/personnel/${agencyId}`).catch((err) => ({ __error: err.message })),
       ])
       setOffers(offerData)
+      if (personnelData?.__error) {
+        setPersonnel(null)
+        setPersonnelError(personnelData.__error || 'Personnel feed unavailable')
+      } else {
+        setPersonnel(personnelData)
+        setPersonnelError('')
+      }
       setQueueState({
         queue: Array.isArray(queueData?.queue) ? queueData.queue : [],
         activeMission: queueData?.activeMission || null,
@@ -494,6 +708,46 @@ export default function Economy({
     }
   }
 
+  const recruitCrewMember = async (name, role) => {
+    if (!agencyId || busyKey) return false
+    setBusyKey('recruit')
+    try {
+      const result = await apiRequest('/personnel/recruit', {
+        method: 'POST',
+        body: JSON.stringify({ agencyId, name, role }),
+      })
+      notify?.(
+        `CREW DIREKRUT: ${toUpper(name)} // TRAINING ${formatInt(result.training_game_days)} GD`,
+      )
+      await Promise.all([load(), onRefresh?.()])
+      return true
+    } catch (err) {
+      notify?.(`REKRUT GAGAL: ${toUpper(err.message || 'UNKNOWN')}`)
+      return false
+    } finally {
+      setBusyKey('')
+    }
+  }
+
+  const startInvestigation = async (investigation) => {
+    if (!agencyId || busyKey) return
+    setBusyKey(`investigation-${investigation.id}`)
+    try {
+      const result = await apiRequest('/personnel/investigations/start', {
+        method: 'POST',
+        body: JSON.stringify({ agencyId, missionId: investigation.mission_id }),
+      })
+      notify?.(
+        `INVESTIGASI DIMULAI: ${toUpper(investigation.mission_name || investigation.mission_id)} // ${formatUsd(result.cost_usd)}`,
+      )
+      await load()
+    } catch (err) {
+      notify?.(`INVESTIGASI GAGAL: ${toUpper(err.message || 'UNKNOWN')}`)
+    } finally {
+      setBusyKey('')
+    }
+  }
+
   if (loading) {
     return (
       <div className="border border-carbon-border bg-carbon-surface px-4 py-6 text-[11px] uppercase tracking-widest text-neutral-400">
@@ -544,6 +798,20 @@ export default function Economy({
       </section>
 
       <BudgetPanel budget={offers?.budget} />
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <PersonnelPanel
+          personnel={personnel}
+          personnelError={personnelError}
+          busyKey={busyKey}
+          onRecruit={recruitCrewMember}
+        />
+        <InvestigationPanel
+          personnel={personnel}
+          busyKey={busyKey}
+          onStart={startInvestigation}
+        />
+      </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <section className="bg-carbon-surface border border-carbon-border">

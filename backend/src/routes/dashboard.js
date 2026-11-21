@@ -5,6 +5,7 @@ const {
 } = require('../middleware/auth');
 const { VEHICLE_PERFORMANCE } = require('../services/missionFeasibility');
 const { calculateAnnualBudget } = require('../services/budgetEngine');
+const { loadAgencyCrew } = require('../services/crewEngine');
 
 module.exports = (supabase, deps = {}) => {
   const router = express.Router();
@@ -63,6 +64,14 @@ module.exports = (supabase, deps = {}) => {
 
       const agencyRank = ranking.findIndex(a => a.id === agencyId) + 1;
 
+      let crew = { rows: [], migration_required: false };
+      try {
+        crew = await loadAgencyCrew(supabase, agencyId);
+      } catch (crewError) {
+        console.error(`Dashboard crew error: ${crewError.message}`);
+        crew = { rows: [], migration_required: false };
+      }
+
       res.json({
         agency,
         agencyRank,
@@ -71,7 +80,11 @@ module.exports = (supabase, deps = {}) => {
           ...vehicle,
           performance_defaults: VEHICLE_PERFORMANCE[vehicle.type] || null,
         })),
-        annualBudget: calculateAnnualBudget(agency, vehicles || []),
+        annualBudget: calculateAnnualBudget(agency, vehicles || [], crew.rows),
+        crew: {
+          migration_required: crew.migration_required,
+          count: crew.rows.length,
+        },
         missions: missions || [],
         missionsError: missionsError ? missionsError.message : null,
         gameDate: new Date().toISOString()

@@ -8,6 +8,7 @@ const productionRoutes = require('../src/routes/production');
 const orbitRoutes = require('../src/routes/orbit');
 const dashboardRoutes = require('../src/routes/dashboard');
 const calendarRoutes = require('../src/routes/calendar');
+const personnelRoutes = require('../src/routes/personnel');
 
 function createDatabase() {
   return {
@@ -50,6 +51,7 @@ async function startServer(client, deps = {}) {
   app.use('/api/orbit', orbitRoutes(client));
   app.use('/api/dashboard', dashboardRoutes(client));
   app.use('/api/calendar', calendarRoutes(client));
+  app.use('/api/personnel', personnelRoutes(client));
 
   const server = await new Promise((resolve) => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
@@ -69,6 +71,9 @@ const agencyScopedRequests = [
   ['PATCH', '/api/production/vehicle/vehicle-1/performance', { agencyId: 'agency-1', delta_v_budget_m_s: 2000 }],
   ['GET', '/api/orbit/overview/agency-1', null],
   ['GET', '/api/dashboard/agency-1', null],
+  ['GET', '/api/personnel/agency-1', null],
+  ['POST', '/api/personnel/recruit', { agencyId: 'agency-1', name: 'Guard Crew', role: 'PILOT' }],
+  ['POST', '/api/personnel/investigations/start', { agencyId: 'agency-1', missionId: 'mission-1' }],
 ];
 
 async function request(baseUrl, method, path, body, token) {
@@ -81,7 +86,7 @@ async function request(baseUrl, method, path, body, token) {
   });
 }
 
-test('agency, research, production, orbit, dashboard, and calendar reject missing tokens', async () => {
+test('agency, research, production, orbit, dashboard, calendar, and personnel reject missing tokens', async () => {
   const client = createClient(createDatabase());
   const { server, baseUrl } = await startServer(client);
 

@@ -8,6 +8,7 @@ const {
 const { ACTIVE_MISSION_STATUSES, planLaunchSchedule } = require('./missionPlan');
 const { azimuthForInclination } = require('./orbitalEngine');
 const { recordAuditEvent } = require('./auditLog');
+const { loadAgencyCrew, selectMissionCrew } = require('./crewEngine');
 const {
   MISSION_TYPES,
   EconomyError,
@@ -77,6 +78,7 @@ async function scheduleMission({
     { data: vehicle, error: vehicleError },
     season,
     contract,
+    crewPool,
   ] = await Promise.all([
     supabase.from('agencies').select('*').eq('id', agencyId).single(),
     supabase.from('vehicles').select('*').eq('id', vehicleId).single(),
@@ -88,6 +90,9 @@ async function scheduleMission({
       missionType,
     }).catch((error) => {
       if (error instanceof EconomyError || error instanceof MissionScheduleError) throw error;
+      throw new MissionScheduleError(500, error.message);
+    }),
+    loadAgencyCrew(supabase, agencyId).catch((error) => {
       throw new MissionScheduleError(500, error.message);
     }),
   ]);
@@ -165,12 +170,17 @@ async function scheduleMission({
     );
   }
 
+  const activeCrew = (crewPool.rows || []).filter(
+    (crew) => String(crew.status || '').toUpperCase() === 'ACTIVE',
+  );
+
   const feasibility = evaluateMissionFeasibility({
     agency,
     vehicle,
     missionType,
     targetInclinationDeg: targetInclination,
     launchSiteLat,
+    crewAvailable: crewPool.migration_required ? null : activeCrew.length,
   });
   if (!feasibility.feasible) {
     throw new MissionScheduleError(
@@ -179,6 +189,28 @@ async function scheduleMission({
       { feasibility },
     );
   }
+
+  const assignedCrew = missionType === 'manned' && !crewPool.migration_required
+    ? selectMissionCrew(crewPool.rows, feasibility.requirements.crew_required)
+    : [];
+  if (
+    missionType === 'manned'
+    && !crewPool.migration_required
+    && assignedCrew.length < feasibility.requirements.crew_required
+  ) {
+    throw new MissionScheduleError(
+      400,
+      `Crew roster shortfall: ${assignedCrew.length} active / ${feasibility.requirements.crew_required} required`,
+      { feasibility },
+    );
+  }
+  const crewManifest = assignedCrew.map((crew) => ({
+    id: crew.id,
+    name: crew.name,
+    role: crew.role,
+    experience: Number(crew.experience || 0),
+    missions_flown: Number(crew.missions_flown || 0),
+  }));
 
   const missionCost = feasibility.estimated_cost;
   const durationPlan = feasibility.estimated_duration;
@@ -209,6 +241,7 @@ async function scheduleMission({
   let rolloutEvent = null;
   let ignitionEvent = null;
   let missionWritten = false;
+  let missionCrewWritten = false;
   let vehicleReserved = false;
   let agencyWritten = false;
 
@@ -246,6 +279,7 @@ async function scheduleMission({
           contract_id: contract?.id || null,
           contract_key: contract?.contract_key || null,
           queue_id: queueId || null,
+          crew: crewManifest,
           feasibility,
         },
       }])
@@ -257,6 +291,21 @@ async function scheduleMission({
     }
     mission = createdMission;
     missionWritten = true;
+
+    if (crewManifest.length > 0) {
+      const { error: crewError } = await supabase
+        .from('mission_crew')
+        .insert(crewManifest.map((crew) => ({
+          mission_id: mission.id,
+          crew_id: crew.id,
+          agency_id: agencyId,
+          role: crew.role,
+          outcome: 'ASSIGNED',
+        })));
+
+      if (crewError) throw new Error(`mission crew: ${crewError.message}`);
+      missionCrewWritten = true;
+    }
 
     const { data: reservedVehicle, error: reserveError } = await supabase
       .from('vehicles')
@@ -304,6 +353,7 @@ async function scheduleMission({
       contract_id: contract?.id || null,
       contract_key: contract?.contract_key || null,
       queue_id: queueId || null,
+      crew: crewManifest,
       cost: missionCost,
       duration,
       feasibility,
@@ -374,6 +424,7 @@ async function scheduleMission({
           launch_site_lon: launchSiteLon,
           target_inclination_deg: targetInclination,
           azimuth_deg: computedAzimuth,
+          crew: crewManifest,
           feasibility,
         },
       }]);
@@ -401,6 +452,7 @@ async function scheduleMission({
         source,
         cost_funding_usd: missionCost.funding_usd,
         total_mission_game_days: duration.total_game_days,
+        crew: crewManifest,
       },
     });
   } catch (error) {
@@ -433,6 +485,14 @@ async function scheduleMission({
       if (releaseError) rollbackErrors.push(releaseError.message);
     }
 
+    if (missionCrewWritten) {
+      const { error: crewDeleteError } = await supabase
+        .from('mission_crew')
+        .delete()
+        .eq('mission_id', mission.id);
+      if (crewDeleteError) rollbackErrors.push(crewDeleteError.message);
+    }
+
     if (missionWritten) {
       const { error: deleteMissionError } = await supabase
         .from('missions')
@@ -455,6 +515,7 @@ async function scheduleMission({
     feasibility,
     missionCost,
     duration,
+    crewAssigned: crewManifest,
     rolloutGameDays: schedule.rolloutGameDays,
     countdownGameDays: schedule.countdownGameDays,
     rolloutCompletesAt: schedule.rolloutCompletesAt,

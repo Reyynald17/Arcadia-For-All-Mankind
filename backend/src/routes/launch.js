@@ -6,6 +6,7 @@ const {
 const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const { MissionScheduleError, scheduleMission } = require('../services/missionScheduler');
 const { evaluateMissionFeasibility } = require('../services/missionFeasibility');
+const { loadAgencyCrew } = require('../services/crewEngine');
 const { MISSION_TYPES } = require('../services/economyEngine');
 const {
   MissionQueueError,
@@ -99,11 +100,15 @@ module.exports = (supabase, deps = {}) => {
     }
 
     try {
-      const [{ data: agency, error: agencyError }, { data: vehicle, error: vehicleError }] =
-        await Promise.all([
-          supabase.from('agencies').select('*').eq('id', agencyId).single(),
-          supabase.from('vehicles').select('*').eq('id', vehicleId).single(),
-        ]);
+      const [
+        { data: agency, error: agencyError },
+        { data: vehicle, error: vehicleError },
+        crewPool,
+      ] = await Promise.all([
+        supabase.from('agencies').select('*').eq('id', agencyId).single(),
+        supabase.from('vehicles').select('*').eq('id', vehicleId).single(),
+        loadAgencyCrew(supabase, agencyId),
+      ]);
 
       if (agencyError || !agency) {
         return res.status(404).json({ error: 'Agency not found', message: 'Agency not found' });
@@ -118,11 +123,15 @@ module.exports = (supabase, deps = {}) => {
         });
       }
 
+      const activeCrew = (crewPool.rows || []).filter(
+        (crew) => String(crew.status || '').toUpperCase() === 'ACTIVE',
+      );
       const feasibility = evaluateMissionFeasibility({
         agency,
         vehicle,
         missionType,
         targetInclinationDeg,
+        crewAvailable: crewPool.migration_required ? null : activeCrew.length,
       });
       res.json({ feasibility });
     } catch (error) {

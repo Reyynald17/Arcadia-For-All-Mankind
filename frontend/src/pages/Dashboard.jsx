@@ -115,7 +115,7 @@ function fundingState(fundingUsd) {
 
 function eventTone(type) {
   const value = toUpper(type)
-  if (value.includes('FAIL') || value.includes('CRASH')) return 'text-alert-red'
+  if (value.includes('FAIL') || value.includes('CRASH') || value.includes('KILLED')) return 'text-alert-red'
   return 'text-neutral-200'
 }
 

@@ -126,6 +126,7 @@ function evaluateMissionFeasibility({
   missionType,
   targetInclinationDeg,
   launchSiteLat,
+  crewAvailable,
 } = {}) {
   const profile = MISSION_PROFILES[missionType] || null;
   const performance = vehiclePerformance(vehicle);
@@ -230,6 +231,20 @@ function evaluateMissionFeasibility({
     });
   }
 
+  const crewAvailableCount = crewAvailable === undefined || crewAvailable === null
+    ? null
+    : Math.max(0, Math.floor(Number(crewAvailable) || 0));
+  if (
+    crewRequired > 0
+    && crewAvailableCount !== null
+    && crewAvailableCount < crewRequired
+  ) {
+    blockers.push({
+      code: 'CREW_ROSTER_SHORTFALL',
+      message: `Active crew short by ${crewRequired - crewAvailableCount} (${crewAvailableCount} active / ${crewRequired} required)`,
+    });
+  }
+
   const fundingMargin = fundingAvailable - missionFunding;
   if (fundingMargin < 0) {
     blockers.push({
@@ -271,6 +286,7 @@ function evaluateMissionFeasibility({
     crew_capacity: crewCapacity,
     crew_required: crewRequired,
     crew_margin: crewMargin,
+    crew_available: crewAvailableCount,
     estimated_cost: estimatedCost,
     estimated_duration: estimatedDuration,
     funding_required_usd: missionFunding,

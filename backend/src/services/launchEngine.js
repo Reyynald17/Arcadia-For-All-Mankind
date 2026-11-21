@@ -1,4 +1,3 @@
-const AGMEngine = require('./agm');
 const { gameDaysToRealMs } = require('./gameClock');
 const { hashSeed, createSeededRng } = require('./seededRng');
 const {
@@ -14,6 +13,12 @@ const {
 } = require('./missionPlan');
 const { settleMissionRewards } = require('./economyEngine');
 const { recordAuditEvent } = require('./auditLog');
+const { simulateStagedLaunch, resolveOperationsStage } = require('./missionRisk');
+const {
+  loadMissionCrewContext,
+  resolveMissionCrew,
+} = require('./crewEngine');
+const { createInvestigationIfMissing } = require('./investigationEngine');
 const {
   completeQueueItem,
   promoteNextMission,
@@ -186,12 +191,17 @@ async function handleLaunchIgnition(supabase, event) {
   if (!vehicle) throw new Error(`LAUNCH_IGNITION vehicle not found: ${mission.vehicle_id}`);
 
   const payload = event.payload || {};
-  const simulation = AGMEngine.simulateMission(
-    { ...agency, rp: payload.agency_rp ?? agency.rp },
-    { ...vehicle, reliability: payload.vehicle_reliability ?? vehicle.reliability },
-    mission.type,
-    createSeededRng(hashSeed(`${mission.mission_seed ?? mission.id}:${event.id}`)),
-  );
+  const crewContext = await loadMissionCrewContext(supabase, mission.id);
+  const simulation = simulateStagedLaunch({
+    agency: { ...agency, rp: payload.agency_rp ?? agency.rp },
+    vehicle: {
+      ...vehicle,
+      reliability: payload.vehicle_reliability ?? vehicle.reliability,
+    },
+    missionType: mission.type,
+    rng: createSeededRng(hashSeed(`${mission.mission_seed ?? mission.id}:${event.id}`)),
+    feasibility: payload.feasibility || mission.telemetry?.feasibility || null,
+  });
 
   const multiplier = Number(payload.time_scale_multiplier) || 52.142857;
   const orbit = simulation.success
@@ -249,6 +259,16 @@ async function handleLaunchIgnition(supabase, event) {
     mission_seed: mission.mission_seed,
     final_score: simulation.finalScore,
     outcome: simulation.success ? 'SUCCESS' : 'FAILURE',
+    failed_stage: simulation.failed_stage || null,
+    stages: simulation.stages || [],
+    crew: crewContext.crew.map((crew) => ({
+      id: crew.id,
+      name: crew.name,
+      role: crew.role,
+      experience: Number(crew.experience || 0),
+      missions_flown: Number(crew.missions_flown || 0),
+    })),
+    crew_experience: crewContext.crew_experience,
     orbit: orbit || null,
     orbit_completes_at: orbitCompletesAt,
   };
@@ -338,6 +358,7 @@ async function handleLaunchIgnition(supabase, event) {
       mission_name: mission.name,
       mission_type: mission.type,
       success: simulation.success,
+      failed_stage: simulation.failed_stage || null,
     },
   });
 
@@ -352,6 +373,41 @@ async function handleLaunchIgnition(supabase, event) {
     .eq('id', vehicle.id);
   if (vehicleUpdateError) throw new Error(`LAUNCH_IGNITION vehicle stats: ${vehicleUpdateError.message}`);
 
+  let crewOutcome = null;
+  let investigation = null;
+  if (!simulation.success) {
+    crewOutcome = await resolveMissionCrew(supabase, mission.id, {
+      success: false,
+      crewDeaths: simulation.crewDeaths || 0,
+      now: new Date(completedAt),
+    });
+    investigation = await createInvestigationIfMissing(supabase, {
+      mission,
+      stage: simulation.failed_stage || 'LAUNCH',
+      now: new Date(completedAt),
+    });
+    await recordAuditEvent(supabase, {
+      actorType: 'system',
+      actorId: 'launch_engine',
+      seasonId: mission.season_id || null,
+      agencyId: mission.agency_id,
+      action: 'MISSION_FAILED',
+      entityType: 'mission',
+      entityId: mission.id,
+      afterData: {
+        status: 'FAILED',
+        failed_stage: simulation.failed_stage || 'LAUNCH',
+        crew_deaths: simulation.crewDeaths || 0,
+      },
+      metadata: {
+        mission_name: mission.name,
+        mission_type: mission.type,
+        stages: simulation.stages || [],
+        investigation_id: investigation?.id || null,
+      },
+    });
+  }
+
   await ensureEventLog(
     supabase,
     mission,
@@ -362,11 +418,15 @@ async function handleLaunchIgnition(supabase, event) {
       result: simulation.success ? 'orbit' : 'failure',
       mission_seed: mission.mission_seed,
       simulation_score: simulation.finalScore,
+      failed_stage: simulation.failed_stage || null,
+      stages: simulation.stages || [],
       rp_gain: simulation.rpGain,
       science_gain: simulation.scienceGain,
       ipi_change: simulation.ipiChange,
       si_change: simulation.siChange,
       crew_deaths: simulation.crewDeaths || 0,
+      crew_outcome: crewOutcome,
+      investigation_id: investigation?.id || null,
       orbit,
       orbit_completes_at: orbitCompletesAt,
     },
@@ -388,6 +448,8 @@ async function handleLaunchIgnition(supabase, event) {
     orbit_completes_at: orbitCompletesAt,
     completed_at: completedAt,
     already_completed: false,
+    crew_outcome: crewOutcome,
+    investigation,
     queue_promotion: queuePromotion,
   };
 }
@@ -408,17 +470,76 @@ async function handleOrbitOperationsComplete(supabase, event) {
   const completedAt = eventTime(event);
   const alreadyCompleted = mission.status !== 'ORBIT';
 
-  if (!alreadyCompleted) {
+  if (alreadyCompleted) {
+    await ensureEventLog(
+      supabase,
+      mission,
+      event,
+      'MISSION_COMPLETED',
+      `Mission ${mission.result || mission.status}: ${mission.name}`,
+      {
+        result: mission.result || mission.status,
+        mission_seed: mission.mission_seed,
+        outcome: mission.outcome || null,
+      },
+    );
+
+    // Reward settlement is idempotent; replaying it keeps retried worker events
+    // returning the original settlement instead of a null reward payload.
+    let rewards = null;
+    if (mission.status === 'COMPLETED') {
+      rewards = await settleMissionRewards(
+        supabase,
+        {
+          ...mission,
+          status: 'COMPLETED',
+          result: 'success',
+          completed_at: mission.completed_at || completedAt,
+        },
+        { completedAt: mission.completed_at || completedAt },
+      );
+    }
+
+    return {
+      mission_id: missionId,
+      status: mission.status,
+      completed_at: mission.completed_at || completedAt,
+      already_completed: true,
+      rewards,
+      operations: mission.outcome?.operations || null,
+      queue_promotion: null,
+    };
+  }
+
+  const [{ data: vehicle, error: vehicleError }, crewContext] = await Promise.all([
+    supabase.from('vehicles').select('*').eq('id', mission.vehicle_id).maybeSingle(),
+    loadMissionCrewContext(supabase, missionId),
+  ]);
+  if (vehicleError) throw new Error(`ORBIT_OPERATIONS_COMPLETE vehicle: ${vehicleError.message}`);
+
+  const operations = resolveOperationsStage({
+    missionType: mission.type,
+    vehicle,
+    feasibility: mission.telemetry?.feasibility || null,
+    crewExperience: crewContext.crew_experience,
+    rng: createSeededRng(hashSeed(`${mission.mission_seed ?? mission.id}:${event.id}:OPERATIONS`)),
+  });
+
+  if (!operations.success) {
     const { data: updated, error: updateError } = await supabase
       .from('missions')
       .update({
-        status: 'COMPLETED',
-        result: 'success',
+        status: 'FAILED',
+        result: 'failure',
         completed_at: completedAt,
+        crew_deaths: operations.crewDeaths || 0,
+        outcome: { ...(mission.outcome || {}), operations },
         telemetry: {
           ...(mission.telemetry || {}),
           orbit_completed_at: completedAt,
           orbit_operations_game_days: event.payload?.orbit_game_days ?? null,
+          failed_stage: 'ORBIT_OPERATIONS',
+          operations,
         },
       })
       .eq('id', missionId)
@@ -430,6 +551,98 @@ async function handleOrbitOperationsComplete(supabase, event) {
     if (!updated) {
       throw new Error('Mission state changed before orbit completion; retry the event');
     }
+
+    const crewOutcome = await resolveMissionCrew(supabase, missionId, {
+      success: false,
+      crewDeaths: operations.crewDeaths || 0,
+      now: new Date(completedAt),
+    });
+    const investigation = await createInvestigationIfMissing(supabase, {
+      mission,
+      stage: 'ORBIT_OPERATIONS',
+      now: new Date(completedAt),
+    });
+
+    await recordAuditEvent(supabase, {
+      actorType: 'system',
+      actorId: 'launch_engine',
+      seasonId: mission.season_id || null,
+      agencyId: mission.agency_id,
+      action: 'MISSION_FAILED',
+      entityType: 'mission',
+      entityId: mission.id,
+      afterData: {
+        status: 'FAILED',
+        failed_stage: 'ORBIT_OPERATIONS',
+        crew_deaths: operations.crewDeaths || 0,
+      },
+      metadata: {
+        mission_name: mission.name,
+        mission_type: mission.type,
+        operations,
+        investigation_id: investigation?.id || null,
+      },
+    });
+
+    await ensureEventLog(
+      supabase,
+      mission,
+      event,
+      'MISSION_COMPLETED',
+      `Mission failed during orbital operations: ${mission.name}`,
+      {
+        result: 'failure',
+        phase: 'ORBIT_OPERATIONS',
+        failed_stage: 'ORBIT_OPERATIONS',
+        mission_seed: mission.mission_seed,
+        operations,
+        crew_deaths: operations.crewDeaths || 0,
+        crew_outcome: crewOutcome,
+        investigation_id: investigation?.id || null,
+        orbit: mission.outcome?.orbit || null,
+        completed_at: completedAt,
+      },
+    );
+
+    await completeQueueItem(supabase, missionId, 'FAILED', 'Orbit operations failure');
+    const queuePromotion = await promoteNextMission(supabase, mission.agency_id);
+
+    return {
+      mission_id: missionId,
+      status: 'FAILED',
+      completed_at: completedAt,
+      already_completed: false,
+      success: false,
+      rewards: null,
+      operations,
+      crew_outcome: crewOutcome,
+      investigation,
+      queue_promotion: queuePromotion,
+    };
+  }
+
+  const { data: updated, error: updateError } = await supabase
+    .from('missions')
+    .update({
+      status: 'COMPLETED',
+      result: 'success',
+      completed_at: completedAt,
+      outcome: { ...(mission.outcome || {}), operations },
+      telemetry: {
+        ...(mission.telemetry || {}),
+        orbit_completed_at: completedAt,
+        orbit_operations_game_days: event.payload?.orbit_game_days ?? null,
+        operations,
+      },
+    })
+    .eq('id', missionId)
+    .eq('status', 'ORBIT')
+    .select('id')
+    .maybeSingle();
+
+  if (updateError) throw new Error(`ORBIT_OPERATIONS_COMPLETE update: ${updateError.message}`);
+  if (!updated) {
+    throw new Error('Mission state changed before orbit completion; retry the event');
   }
 
   const completedMission = {
@@ -439,6 +652,11 @@ async function handleOrbitOperationsComplete(supabase, event) {
     completed_at: completedAt,
   };
   const rewards = await settleMissionRewards(supabase, completedMission, { completedAt });
+  const crewOutcome = await resolveMissionCrew(supabase, missionId, {
+    success: true,
+    crewDeaths: 0,
+    now: new Date(completedAt),
+  });
 
   await ensureEventLog(
     supabase,
@@ -450,6 +668,8 @@ async function handleOrbitOperationsComplete(supabase, event) {
       result: 'success',
       phase: 'ORBIT_OPERATIONS',
       mission_seed: mission.mission_seed,
+      operations,
+      crew_outcome: crewOutcome,
       orbit: mission.outcome?.orbit || null,
       orbit_operations_game_days: event.payload?.orbit_game_days ?? null,
       completed_at: completedAt,
@@ -464,8 +684,11 @@ async function handleOrbitOperationsComplete(supabase, event) {
     mission_id: missionId,
     status: 'COMPLETED',
     completed_at: completedAt,
-    already_completed: alreadyCompleted,
+    already_completed: false,
+    success: true,
     rewards,
+    operations,
+    crew_outcome: crewOutcome,
     queue_promotion: queuePromotion,
   };
 }

@@ -16,6 +16,8 @@ const {
 } = require('../services/economyEngine');
 const { promoteNextMission } = require('../services/missionQueue');
 const { getBudgetOverview } = require('../services/budgetEngine');
+const { getCrewOverview } = require('../services/crewEngine');
+const { listInvestigations } = require('../services/investigationEngine');
 const { recordAuditEvent, playerActor } = require('../services/auditLog');
 
 function migrationMissing(error) {
@@ -99,7 +101,14 @@ module.exports = (supabase, deps = {}) => {
         };
       });
 
-      const budget = await getBudgetOverview(supabase, agency);
+      const [crewOverview, investigations] = await Promise.all([
+        getCrewOverview(supabase, agencyId),
+        listInvestigations(supabase, agencyId),
+      ]);
+
+      const budget = await getBudgetOverview(supabase, agency, {
+        crew: crewOverview.crew,
+      });
 
       res.json({
         agency: {
@@ -112,6 +121,13 @@ module.exports = (supabase, deps = {}) => {
           successful_launches: agency.successful_launches,
         },
         budget,
+        personnel: {
+          migration_required:
+            crewOverview.migration_required || investigations.migration_required,
+          counts: crewOverview.counts,
+          payroll: crewOverview.payroll,
+          investigations: investigations.items,
+        },
         contracts,
         grants,
         recent_rewards: rewardsResult.data || [],
