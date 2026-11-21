@@ -59,7 +59,60 @@ function createAuthMiddleware(supabase) {
   };
 }
 
+function createAgencyOwnershipMiddleware(supabase) {
+  return async function requireOwnedAgency(req, res, next) {
+    try {
+      const agencyId = req.params?.agencyId || req.body?.agencyId;
+      if (!agencyId) {
+        return res.status(400).json({
+          error: 'AGENCY_REQUIRED',
+          message: 'agencyId is required.',
+        });
+      }
+
+      const { data: agency, error } = await supabase
+        .from('agencies')
+        .select('id, user_id, controller_type')
+        .eq('id', agencyId)
+        .maybeSingle();
+
+      if (error) {
+        console.error(`[auth] agency lookup: ${error.message}`);
+        return res.status(500).json({
+          error: 'OWNERSHIP_CHECK_FAILED',
+          message: 'Could not verify agency ownership.',
+        });
+      }
+      if (!agency) {
+        return res.status(404).json({
+          error: 'AGENCY_NOT_FOUND',
+          message: 'Agency not found.',
+        });
+      }
+      if (
+        agency.controller_type !== 'player'
+        || String(agency.user_id || '') !== String(req.authUser?.id || '')
+      ) {
+        return res.status(403).json({
+          error: 'FORBIDDEN_AGENCY',
+          message: 'You do not control this agency.',
+        });
+      }
+
+      req.ownedAgency = agency;
+      next();
+    } catch (error) {
+      console.error(`[auth] ownership check: ${error?.message || 'unknown error'}`);
+      res.status(500).json({
+        error: 'OWNERSHIP_CHECK_FAILED',
+        message: 'Could not verify agency ownership.',
+      });
+    }
+  };
+}
+
 module.exports = {
   validateToken,
   createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
 };

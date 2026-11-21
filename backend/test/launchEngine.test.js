@@ -137,6 +137,12 @@ test('LAUNCH_IGNITION resolves the mission deterministically and applies stats o
   assert.equal(database.scheduled_events.length, 1);
   assert.equal(database.scheduled_events[0].event_type, 'ORBIT_OPERATIONS_COMPLETE');
   assert.equal(otherDatabase.logs.length, 1);
+
+  const audit = database.audit_events.find((event) => event.action === 'MISSION_STATS_UPDATE');
+  assert.ok(audit, 'launch stats should be audited');
+  assert.equal(audit.actor_type, 'system');
+  assert.equal(audit.delta_data.rp, 10);
+  assert.equal(audit.delta_data.science_points, 20);
 });
 
 test('ORBIT_OPERATIONS_COMPLETE closes an orbital mission once', async () => {

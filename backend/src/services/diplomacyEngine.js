@@ -9,6 +9,7 @@ const {
   DEFAULT_TIME_SCALE,
 } = require('./gameClock');
 const { hashSeed, createSeededRng } = require('./seededRng');
+const { recordAuditEvent } = require('./auditLog');
 
 const ERROR_STATUS = {
   AUTH_REQUIRED: 401,
@@ -721,7 +722,7 @@ async function previewProposal(supabase, options = {}) {
   return publicPreview(prepared, config);
 }
 
-async function chargeFunding(supabase, agency, amount) {
+async function chargeFunding(supabase, agency, amount, auditContext = {}) {
   const cost = Number(amount) || 0;
   const available = Number(agency.funding_usd) || 0;
   if (available < cost) {
@@ -743,17 +744,47 @@ async function chargeFunding(supabase, agency, amount) {
       available,
     });
   }
+
+  await recordAuditEvent(supabase, {
+    actorType: 'agency',
+    actorId: auditContext.actorId || agency.id,
+    agencyId: agency.id,
+    action: auditContext.action || 'DIPLOMACY_FUNDING_DEBIT',
+    entityType: auditContext.entityType || 'diplomacy',
+    entityId: auditContext.entityId,
+    beforeData: { funding_usd: available },
+    afterData: { funding_usd: Number(data.funding_usd) },
+    deltaData: { funding_usd: -cost },
+    metadata: auditContext.metadata || null,
+  });
+
   return Number(data.funding_usd);
 }
 
-async function refundFunding(supabase, agencyId, amount) {
+async function refundFunding(supabase, agencyId, amount, auditContext = {}) {
   const agency = await loadAgency(supabase, agencyId);
   if (!agency) return null;
+  const beforeFunding = Number(agency.funding_usd || 0);
+  const refund = Number(amount) || 0;
   const { error } = await supabase
     .from('agencies')
-    .update({ funding_usd: Number(agency.funding_usd || 0) + Number(amount || 0) })
+    .update({ funding_usd: beforeFunding + refund })
     .eq('id', agencyId);
   if (error) throw new Error(error.message);
+
+  await recordAuditEvent(supabase, {
+    actorType: 'agency',
+    actorId: auditContext.actorId || agencyId,
+    agencyId,
+    action: auditContext.action || 'DIPLOMACY_FUNDING_REFUND',
+    entityType: auditContext.entityType || 'diplomacy',
+    entityId: auditContext.entityId,
+    beforeData: { funding_usd: beforeFunding },
+    afterData: { funding_usd: beforeFunding + refund },
+    deltaData: { funding_usd: refund },
+    metadata: auditContext.metadata || null,
+  });
+
   return null;
 }
 
@@ -789,7 +820,15 @@ async function createProposal(supabase, options = {}) {
   }
 
   const { fromAgency, toAgency, evaluation, durationDays, note, agreementType, season, now } = prepared;
-  const newFunding = await chargeFunding(supabase, fromAgency, evaluation.costFunding);
+  const newFunding = await chargeFunding(supabase, fromAgency, evaluation.costFunding, {
+    entityType: 'proposal',
+    metadata: {
+      event: 'PROPOSAL_SENT',
+      proposal_type: agreementType,
+      counterpart_agency_id: toAgency.id,
+      duration_days: durationDays,
+    },
+  });
 
   const { data: proposal, error: insertError } = await supabase
     .from('diplomatic_proposals')
@@ -807,7 +846,10 @@ async function createProposal(supabase, options = {}) {
     .single();
 
   if (insertError || !proposal) {
-    await refundFunding(supabase, fromAgency.id, evaluation.costFunding);
+    await refundFunding(supabase, fromAgency.id, evaluation.costFunding, {
+      entityType: 'proposal',
+      metadata: { event: 'PROPOSAL_ROLLBACK', counterpart_agency_id: toAgency.id },
+    });
     if (/duplicate|unique/i.test(String(insertError?.message || ''))) {
       throw new DiplomacyError('DUPLICATE_PROPOSAL', 'A proposal for this pair is already pending.');
     }
@@ -1194,7 +1236,15 @@ async function respondToProposal(supabase, options = {}) {
 
   let newFunding = Number(actor.funding_usd);
   try {
-    newFunding = await chargeFunding(supabase, actor, counterCost);
+    newFunding = await chargeFunding(supabase, actor, counterCost, {
+      entityType: 'proposal',
+      entityId: proposal.id,
+      metadata: {
+        event: 'PROPOSAL_COUNTERED',
+        counterpart_agency_id: originalSender.id,
+        duration_days: durationDays,
+      },
+    });
     const { data: counterProposal, error: counterError } = await supabase
       .from('diplomatic_proposals')
       .insert([{
@@ -1260,7 +1310,11 @@ async function respondToProposal(supabase, options = {}) {
     };
   } catch (error) {
     try {
-      await refundFunding(supabase, actor.id, counterCost);
+      await refundFunding(supabase, actor.id, counterCost, {
+        entityType: 'proposal',
+        entityId: proposal.id,
+        metadata: { event: 'COUNTER_ROLLBACK' },
+      });
     } catch {
       // Best-effort rollback; the error is reported below.
     }

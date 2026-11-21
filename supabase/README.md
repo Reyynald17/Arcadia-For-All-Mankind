@@ -14,6 +14,8 @@ Canonical schema changes are versioned in `migrations/`:
 8. `008_economy.sql` - contracts, one-time grants, mission rewards, and the mission queue.
 9. `009_economy_rls.sql` - economy RLS and read-own policies.
 10. `010_contract_mission_link.sql` - links completed contracts to their mission and backfills existing rows.
+11. `011_audit_events.sql` - audit trail for GM actions and financial mutations (backend service role only).
+12. `012_audit_append_only.sql` - blocks UPDATE, DELETE, and TRUNCATE on `audit_events`; keeps agency/season as soft references.
 
 `schema.sql` is generated from those files by `npm run db:schema`. Do not edit it by hand.
 
@@ -21,13 +23,13 @@ Canonical schema changes are versioned in `migrations/`:
 
 Open the Supabase SQL Editor and run `schema.sql`. It includes the schema, policies, tech catalog, and station seed, and it is safe to re-run.
 
-Alternatively, apply `migrations/001` through `010` in order.
+Alternatively, apply `migrations/001` through `012` in order.
 
 ## Existing Shared Project
 
 Migrations are additive and preserve the legacy AP/RP/SI/IPI columns while the Phase 1 backend cutover is pending.
 
-Do not apply them to a shared production project without owner approval. Apply `001` through `010` in order, then run the legacy backfill:
+Do not apply them to a shared production project without owner approval. Apply `001` through `012` in order, then run the legacy backfill:
 
 ```bash
 npm run db:backfill

@@ -1,5 +1,10 @@
 const express = require('express');
 const { randomUUID } = require('node:crypto');
+const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const AGMEngine = require('../services/agm');
 const { loadActiveSeason, gameDaysToRealMs, MS_PER_DAY } = require('../services/gameClock');
 const {
@@ -8,6 +13,7 @@ const {
 } = require('../services/researchEngine');
 const { planStaticFire } = require('../services/trlEngine');
 const { hashSeed } = require('../services/seededRng');
+const { recordAuditEvent, playerActor } = require('../services/auditLog');
 
 const ACTIVE_RESEARCH_STATUSES = new Set(['RESEARCHING', 'UNLOCKED', 'EMBARGOED']);
 
@@ -64,11 +70,17 @@ function resolveResearchCost(tech, agency) {
   };
 }
 
-module.exports = (supabase) => {
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
+  const writeRateLimit = deps.writeRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 30 });
+
+  router.use(authenticate);
 
   // Start research. Completion is handled by the scheduled-event worker.
-  router.post('/start', async (req, res) => {
+  router.post('/start', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const body = req.body || {};
     const { agencyId, technologyName, nodeId, engineers: requestedEngineers } = body;
 
@@ -321,6 +333,32 @@ module.exports = (supabase) => {
           }]);
 
         if (logError) throw new Error(`logs: ${logError.message}`);
+
+        await recordAuditEvent(supabase, {
+          ...playerActor(req),
+          seasonId,
+          agencyId,
+          action: 'RESEARCH_STARTED',
+          entityType: 'research',
+          entityId: tech.node_id,
+          beforeData: {
+            science_points: Number(agency.science_points || 0),
+            funding_usd: Number(agency.funding_usd || 0),
+          },
+          afterData: {
+            science_points: newSciencePoints,
+            funding_usd: newFunding,
+          },
+          deltaData: {
+            science_points: -researchCost.science_points,
+            funding_usd: -researchCost.funding_usd,
+          },
+          metadata: {
+            technology: tech.name,
+            event_id: eventRow.id,
+            duration_game_days: roundedGameDays,
+          },
+        });
       } catch (error) {
         const rollbackErrors = [];
 
@@ -408,7 +446,7 @@ module.exports = (supabase) => {
   });
 
   // Schedule a static fire test for an unlocked node.
-  router.post('/static-fire', async (req, res) => {
+  router.post('/static-fire', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const { agencyId, nodeId } = req.body || {};
     if (!agencyId || !nodeId) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -535,6 +573,23 @@ module.exports = (supabase) => {
           }]);
 
         if (logError) throw new Error(`logs: ${logError.message}`);
+
+        await recordAuditEvent(supabase, {
+          ...playerActor(req),
+          seasonId: agency.season_id || season.id,
+          agencyId,
+          action: 'STATIC_FIRE_STARTED',
+          entityType: 'static_fire',
+          entityId: eventRow.id,
+          beforeData: { funding_usd: Number(agency.funding_usd || 0) },
+          afterData: { funding_usd: newFunding },
+          deltaData: { funding_usd: -testCost },
+          metadata: {
+            technology: tech.name,
+            node_id: nodeId,
+            completes_at: schedule.completesAt,
+          },
+        });
       } catch (error) {
         const rollbackErrors = [];
 
@@ -582,7 +637,7 @@ module.exports = (supabase) => {
   });
 
   // Get available technologies. Completion is handled by the scheduled-event worker.
-  router.get('/available/:agencyId', async (req, res) => {
+  router.get('/available/:agencyId', requireOwnedAgency, async (req, res) => {
     try {
       const { agencyId } = req.params;
 

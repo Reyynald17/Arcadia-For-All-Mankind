@@ -18,6 +18,12 @@ const MAX_BUFFER = 200
 
 const VEHICLE_TYPES = ['sounding-rocket', 'orbital-rocket', 'satellite', 'capsule', 'probe', 'lander']
 const MISSION_TYPES = ['test', 'scientific', 'manned', 'colonial']
+const MISSION_VEHICLE_TYPES = {
+  test: ['sounding-rocket', 'orbital-rocket'],
+  scientific: ['orbital-rocket', 'satellite', 'probe'],
+  manned: ['capsule'],
+  colonial: ['lander'],
+}
 
 const VEHICLE_LABEL = {
   'sounding-rocket': 'ROKET SONDA',
@@ -79,6 +85,10 @@ function formatUsd(value) {
   return `$${Math.round(amount)}`
 }
 
+function formatInt(value) {
+  return Math.round(num(value)).toLocaleString('en-US')
+}
+
 function formatClock(totalSeconds) {
   const seconds = Math.max(0, Math.floor(num(totalSeconds)))
   return `${pad(Math.floor(seconds / 3600))}:${pad(Math.floor((seconds % 3600) / 60))}:${pad(seconds % 60)}`
@@ -133,6 +143,7 @@ async function apiRequest(path, options = {}) {
   if (!response.ok) {
     const requestError = new Error(payload?.message || payload?.error || `HTTP ${response.status}`)
     requestError.code = payload?.error
+    requestError.details = payload?.details
     throw requestError
   }
   return payload
@@ -295,6 +306,12 @@ export default function Dashboard({ user }) {
 
   const primaryVehicle =
     vehicles.find((vehicle) => !['manufacturing', 'assigned'].includes(vehicle.status)) || null
+  const testVehicle =
+    vehicles.find(
+      (vehicle) =>
+        !['manufacturing', 'assigned'].includes(vehicle.status)
+        && MISSION_VEHICLE_TYPES.test.includes(vehicle.type),
+    ) || null
   const activeMission =
     (dashboard?.missions || []).find((mission) =>
       ['PLANNED', 'ROLLOUT', 'COUNTDOWN', 'ASCENT', 'ORBIT'].includes(mission.status),
@@ -316,6 +333,8 @@ export default function Dashboard({ user }) {
   const si = num(agencyView.si)
   const slr = num(agencyView.slr)
   const totalLaunches = num(agencyView.total_launches)
+  const annualBudget = dashboard?.annualBudget || null
+  const annualNet = num(annualBudget?.net_usd)
 
   const siState = stabilityState(si)
   const fundingFlag = fundingState(fundingUsd)
@@ -412,23 +431,54 @@ export default function Dashboard({ user }) {
           if (!isQuickTest && !MISSION_TYPES.includes(type)) {
             throw new Error(`SYNTAX: /luncurkan <${MISSION_TYPES.join('|')}> [nama]`)
           }
-          if (!primaryVehicle) {
-            throw new Error('TIDAK ADA VEHICLE SIAP DI HANGAR BAY // /produksi DULU')
+          const allowedVehicleTypes = MISSION_VEHICLE_TYPES[type] || []
+          const launchVehicle =
+            vehicles.find(
+              (vehicle) =>
+                !['manufacturing', 'assigned'].includes(vehicle.status)
+                && allowedVehicleTypes.includes(vehicle.type),
+            ) || null
+          if (!launchVehicle) {
+            const suggestedType = allowedVehicleTypes[0] || 'orbital-rocket'
+            throw new Error(
+              `TIDAK ADA VEHICLE SIAP UNTUK ${MISSION_LABEL[type] || toUpper(type)} // /produksi ${suggestedType}`,
+            )
           }
 
           const missionName = nameArgs.join(' ').trim() || generateName(`MISI-${toUpper(type)}`)
           pushLine('info', `> LAUNCH DIRECTIVE: ${toUpper(missionName)} // ${MISSION_LABEL[type] || titleCase(type)}`)
+          pushLine('data', `> VEHICLE ${toUpper(launchVehicle.name)} // ${toUpper(launchVehicle.type)}`)
 
           const result = await apiRequest('/launch/mission', {
             method: 'POST',
             body: JSON.stringify({
               agencyId,
               missionName,
-              vehicleId: primaryVehicle.id,
+              vehicleId: launchVehicle.id,
               missionType: type,
             }),
           })
           pushLine('ok', `> LAUNCH WINDOW LOCKED: ${toUpper(missionName)}`)
+          if (result.feasibility) {
+            const feasibility = result.feasibility
+            pushLine(
+              'data',
+              `> FEAS DV ${formatInt(feasibility.delta_v_available_m_s)}/${formatInt(feasibility.delta_v_required_m_s)} M/S // PAYLOAD ${formatInt(feasibility.payload_required_kg)}/${formatInt(feasibility.payload_capacity_kg)} KG // CREW ${feasibility.crew_required}/${feasibility.crew_capacity}`,
+            )
+            if ((feasibility.warnings || []).length > 0) {
+              pushLine('warn', `> WARN: ${feasibility.warnings.map((warning) => toUpper(warning.message)).join('; ')}`)
+            }
+          }
+          if (result.missionCost && result.duration) {
+            pushLine(
+              'data',
+              `> COST ${formatUsd(result.missionCost.funding_usd)} // BASE ${formatUsd(result.missionCost.base_funding_usd)} + DV ${formatUsd(result.missionCost.delta_v_funding_usd)} + PAYLOAD ${formatUsd(result.missionCost.payload_funding_usd)}`,
+            )
+            pushLine(
+              'data',
+              `> DURATION ${formatInt(result.duration.total_game_days)} GD // PREP ${formatInt(result.duration.rollout_game_days)} GD // OPS ${formatInt(result.duration.orbit_operations_game_days)} GD`,
+            )
+          }
           pushLine(
             'data',
             `> ROLLOUT COMPLETE ${formatTime(result.rolloutCompletesAt)} // IGNITION ${formatTime(result.scheduledLaunchAt)}`,
@@ -442,12 +492,16 @@ export default function Dashboard({ user }) {
           throw new Error(`DIRECTIVE TIDAK DIKENAL: ${directive} // GUNAKAN /bantuan`)
         }
       } catch (err) {
-        pushLine('error', `> ERROR: ${toUpper(err.message || 'EXECUTION FAILED')}`)
+        const feasibilityBlockers = err.details?.feasibility?.blockers
+        const details = Array.isArray(feasibilityBlockers) && feasibilityBlockers.length > 0
+          ? ` // ${feasibilityBlockers.map((blocker) => toUpper(blocker.message)).join('; ')}`
+          : ''
+        pushLine('error', `> ERROR: ${toUpper(err.message || 'EXECUTION FAILED')}${details}`)
       } finally {
         setCommandBusy(false)
       }
     },
-    [agencyId, commandBusy, loadDashboard, loadOrbit, primaryVehicle, pushLine],
+    [agencyId, commandBusy, loadDashboard, loadOrbit, pushLine, vehicles],
   )
 
   const handleCommandSubmit = (event) => {
@@ -464,7 +518,7 @@ export default function Dashboard({ user }) {
       setNotice(`MISSION ACTIVE: ${toUpper(activeMission.name)} // ${activeMission.status}`)
       return
     }
-    if (!primaryVehicle) {
+    if (!testVehicle) {
       const assembly = vehicles.find((vehicle) => vehicle.status === 'manufacturing')
       if (assembly) {
         setNotice(`ASSEMBLY IN PROGRESS: ${toUpper(assembly.name)}`)
@@ -658,6 +712,14 @@ export default function Dashboard({ user }) {
             FUNDING <b className="text-neutral-100 text-xs tabular-nums">{formatUsd(fundingUsd)}</b>{' '}
             <span className={fundingFlag.tone}>[{fundingFlag.label}]</span>
           </span>
+          {annualBudget && (
+            <span>
+              NET/YR{' '}
+              <b className={`text-xs tabular-nums ${annualNet >= 0 ? 'text-emerald-400' : 'text-alert-red'}`}>
+                {annualNet >= 0 ? '+' : '-'}{formatUsd(Math.abs(annualNet))}
+              </b>
+            </span>
+          )}
           <span>
             RP <b className="text-neutral-100 text-xs">{rp}</b> <span className="text-neutral-400">#{agencyRank || '—'}</span>
           </span>
@@ -731,7 +793,7 @@ export default function Dashboard({ user }) {
                     className="w-full bg-flight-amber hover:bg-flight-amber-dim disabled:opacity-60 disabled:cursor-not-allowed text-black font-bold text-[11px] uppercase px-3 py-2 flex items-center justify-center gap-1.5 bezier-fast"
                   >
                     <span className="material-symbols-outlined text-sm">rocket_launch</span>
-                    {activeMission ? 'Misi Aktif' : primaryVehicle ? 'Autorisasi Luncur' : 'Rakit Wahana Dulu'}
+                    {activeMission ? 'Misi Aktif' : testVehicle ? 'Autorisasi Luncur' : 'Rakit Wahana Dulu'}
                   </button>
                 </div>
               </div>

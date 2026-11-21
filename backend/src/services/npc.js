@@ -4,6 +4,7 @@
  */
 
 const AGMEngine = require('./agm');
+const { calculateMissionCost } = require('./missionLogistics');
 
 const NPCService = {
   /**
@@ -95,7 +96,7 @@ const NPCService = {
     try {
       const missionTypes = ['test', 'scientific', 'manned'];
       const missionType = missionTypes[Math.floor(Math.random() * missionTypes.length)];
-      const cost = AGMEngine.calculateMissionCost(missionType);
+      const cost = calculateMissionCost({ missionType });
 
       if (npc.ap >= cost.ap && npc.budget >= cost.budget) {
         // Simulate basic vehicle

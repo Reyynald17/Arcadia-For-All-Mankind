@@ -1,9 +1,13 @@
 const { randomUUID } = require('node:crypto');
-const AGMEngine = require('./agm');
 const { loadActiveSeason, MS_PER_DAY } = require('./gameClock');
 const { hashSeed } = require('./seededRng');
+const {
+  evaluateMissionFeasibility,
+  feasibilityErrorMessage,
+} = require('./missionFeasibility');
 const { ACTIVE_MISSION_STATUSES, planLaunchSchedule } = require('./missionPlan');
 const { azimuthForInclination } = require('./orbitalEngine');
+const { recordAuditEvent } = require('./auditLog');
 const {
   MISSION_TYPES,
   EconomyError,
@@ -13,10 +17,11 @@ const {
 const IN_FLIGHT_VEHICLE_STATUSES = new Set(['manufacturing', 'assigned']);
 
 class MissionScheduleError extends Error {
-  constructor(status, message) {
+  constructor(status, message, details = null) {
     super(message);
     this.name = 'MissionScheduleError';
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -126,12 +131,6 @@ async function scheduleMission({
     }
   }
 
-  const missionCost = AGMEngine.calculateMissionCost(missionType);
-  const validation = AGMEngine.validateProduction(agency, missionCost);
-  if (!validation.valid) {
-    throw new MissionScheduleError(400, validation.message);
-  }
-
   const { data: activeMission, error: activeMissionError } = await supabase
     .from('missions')
     .select('id')
@@ -166,13 +165,40 @@ async function scheduleMission({
     );
   }
 
+  const feasibility = evaluateMissionFeasibility({
+    agency,
+    vehicle,
+    missionType,
+    targetInclinationDeg: targetInclination,
+    launchSiteLat,
+  });
+  if (!feasibility.feasible) {
+    throw new MissionScheduleError(
+      400,
+      feasibilityErrorMessage(feasibility),
+      { feasibility },
+    );
+  }
+
+  const missionCost = feasibility.estimated_cost;
+  const durationPlan = feasibility.estimated_duration;
   const multiplier = Number(season.time_scale_multiplier) || 52.142857;
   const missionSeed = hashSeed(randomUUID());
   const schedule = planLaunchSchedule({
     missionSeed,
     multiplier,
     now: new Date(),
+    preparationGameDays: durationPlan.preparation_complexity_game_days,
   });
+  const duration = {
+    ...durationPlan,
+    rollout_game_days: schedule.rolloutGameDays,
+    countdown_game_days: schedule.countdownGameDays,
+    total_game_days:
+      schedule.rolloutGameDays
+      + schedule.countdownGameDays
+      + durationPlan.orbit_operations_game_days,
+  };
 
   const scheduledLaunchMs = new Date(schedule.scheduledLaunchAt).getTime() - Date.now();
   const scheduledLaunchDays = Math.max(1, Math.ceil(scheduledLaunchMs / MS_PER_DAY));
@@ -215,9 +241,12 @@ async function scheduleMission({
           scheduled_launch_at: schedule.scheduledLaunchAt,
           time_scale_multiplier: multiplier,
           cost_funding_usd: missionCost.funding_usd,
+          cost: missionCost,
+          duration,
           contract_id: contract?.id || null,
           contract_key: contract?.contract_key || null,
           queue_id: queueId || null,
+          feasibility,
         },
       }])
       .select()
@@ -275,6 +304,9 @@ async function scheduleMission({
       contract_id: contract?.id || null,
       contract_key: contract?.contract_key || null,
       queue_id: queueId || null,
+      cost: missionCost,
+      duration,
+      feasibility,
     };
 
     const { data: rolloutRow, error: rolloutError } = await supabase
@@ -333,16 +365,44 @@ async function scheduleMission({
           rollout_event_id: rolloutRow.id,
           ignition_event_id: ignitionRow.id,
           cost_funding_usd: missionCost.funding_usd,
+          cost: missionCost,
+          duration,
+          total_mission_game_days: duration.total_game_days,
           rollout_completes_at: schedule.rolloutCompletesAt,
           scheduled_launch_at: schedule.scheduledLaunchAt,
           launch_site_lat: launchSiteLat,
           launch_site_lon: launchSiteLon,
           target_inclination_deg: targetInclination,
           azimuth_deg: computedAzimuth,
+          feasibility,
         },
       }]);
 
     if (logError) throw new Error(`logs: ${logError.message}`);
+
+    await recordAuditEvent(supabase, {
+      actorType: 'agency',
+      actorId: agencyId,
+      seasonId,
+      agencyId,
+      action: 'MISSION_SCHEDULED',
+      entityType: 'mission',
+      entityId: mission.id,
+      beforeData: { funding_usd: Number(agency.funding_usd || 0) },
+      afterData: { funding_usd: newFunding },
+      deltaData: { funding_usd: -missionCost.funding_usd },
+      metadata: {
+        mission_name: missionName,
+        mission_type: missionType,
+        vehicle_id: vehicleId,
+        contract_id: contract?.id || null,
+        contract_key: contract?.contract_key || null,
+        queue_id: queueId || null,
+        source,
+        cost_funding_usd: missionCost.funding_usd,
+        total_mission_game_days: duration.total_game_days,
+      },
+    });
   } catch (error) {
     const rollbackErrors = [];
 
@@ -392,6 +452,9 @@ async function scheduleMission({
     message: 'Launch scheduled',
     mission,
     missionSeed,
+    feasibility,
+    missionCost,
+    duration,
     rolloutGameDays: schedule.rolloutGameDays,
     countdownGameDays: schedule.countdownGameDays,
     rolloutCompletesAt: schedule.rolloutCompletesAt,

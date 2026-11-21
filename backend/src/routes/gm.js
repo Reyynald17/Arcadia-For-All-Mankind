@@ -1,10 +1,12 @@
-const crypto = require('node:crypto');
 const express = require('express');
+const { createGmAuthMiddleware } = require('../middleware/gm');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const {
   gameDateAt,
   gameDaysToRealMs,
   loadActiveSeason,
 } = require('../services/gameClock');
+const { recordAuditEvent, listAuditEvents, gmActor } = require('../services/auditLog');
 
 const OPERATION_EVENT_TYPES = [
   'PRODUCTION_COMPLETE',
@@ -18,15 +20,6 @@ const OPERATION_EVENT_TYPES = [
 const OPERATION_EVENT_SET = new Set(OPERATION_EVENT_TYPES);
 const MAX_ADVANCE_GAME_DAYS = 3650;
 
-function digest(value) {
-  return crypto.createHash('sha256').update(String(value)).digest();
-}
-
-function keyMatches(provided, expected) {
-  if (!provided || !expected) return false;
-  return crypto.timingSafeEqual(digest(provided), digest(expected));
-}
-
 function eventTime(event) {
   const value = new Date(event.execute_at).getTime();
   return Number.isFinite(value) ? value : 0;
@@ -37,24 +30,12 @@ module.exports = (
   {
     accessKey = process.env.GM_ACCESS_KEY,
     now = () => new Date(),
+    writeRateLimit = createRateLimitMiddleware({ windowMs: 60000, max: 30 }),
   } = {},
 ) => {
   const router = express.Router();
-  const configuredKey = String(accessKey || '').trim();
 
-  router.use((req, res, next) => {
-    if (!configuredKey) {
-      return res.status(503).json({
-        error: 'GM_DISABLED',
-        message: 'Set GM_ACCESS_KEY in backend/.env and restart the backend.',
-      });
-    }
-    const provided = req.get('x-gm-key') || '';
-    if (!keyMatches(provided, configuredKey)) {
-      return res.status(401).json({ error: 'GM_UNAUTHORIZED' });
-    }
-    next();
-  });
+  router.use(createGmAuthMiddleware({ accessKey }));
 
   router.get('/agencies', async (req, res) => {
     try {
@@ -67,6 +48,26 @@ module.exports = (
       res.json({ agencies: data || [] });
     } catch (error) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  router.get('/audit', async (req, res) => {
+    try {
+      const events = await listAuditEvents(supabase, {
+        agencyId: String(req.query.agencyId || '').trim() || undefined,
+        actorType: String(req.query.actorType || '').trim() || undefined,
+        action: String(req.query.action || '').trim() || undefined,
+        entityType: String(req.query.entityType || '').trim() || undefined,
+        limit: req.query.limit,
+        before: String(req.query.before || '').trim() || undefined,
+      });
+      res.json({ events });
+    } catch (error) {
+      const status = error.status === 503 ? 503 : 500;
+      res.status(status).json({
+        error: error.code || 'AUDIT_QUERY_FAILED',
+        message: error.message,
+      });
     }
   });
 
@@ -138,7 +139,7 @@ module.exports = (
     }
   });
 
-  router.post('/advance', async (req, res) => {
+  router.post('/advance', writeRateLimit, async (req, res) => {
     const body = req.body || {};
     const agencyId = String(body.agencyId || '').trim();
     const mode = body.mode === 'now' ? 'now' : 'shift';
@@ -240,6 +241,26 @@ module.exports = (
       }));
 
       const applied = results.filter(Boolean);
+
+      await recordAuditEvent(supabase, {
+        ...gmActor(req),
+        seasonId: season.id,
+        agencyId,
+        action: 'GM_ADVANCE_TIME',
+        entityType: 'agency',
+        entityId: agencyId,
+        deltaData: { events_shifted: applied.length },
+        metadata: {
+          mode,
+          scope,
+          gameDays,
+          updated: applied.length,
+          skipped: updates.length - applied.length,
+          realMinutes: shiftMs === null ? null : Math.round(shiftMs / 60000),
+          eventIds: applied.map((event) => event.id),
+          ip: req.ip || null,
+        },
+      });
 
       res.json({
         agency,

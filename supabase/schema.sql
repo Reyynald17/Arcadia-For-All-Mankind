@@ -2369,3 +2369,448 @@ set mission_id = mission.id,
 from missions as mission
 where mission.contract_id = contract.id
   and contract.mission_id is null;
+
+-- ===== 011_audit_events.sql =====
+
+-- Audit trail for GM actions and financial mutations.
+-- Service-role only: RLS is enabled without client policies.
+
+create table if not exists audit_events (
+  id uuid primary key default gen_random_uuid(),
+  season_id uuid references seasons(id) on delete set null,
+  agency_id uuid references agencies(id) on delete set null,
+  actor_type text not null
+    check (actor_type in ('gm', 'player', 'agency', 'system')),
+  actor_id text,
+  action text not null,
+  entity_type text,
+  entity_id text,
+  before_data jsonb,
+  after_data jsonb,
+  delta_data jsonb,
+  metadata jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists audit_events_agency_created_idx
+  on audit_events (agency_id, created_at desc);
+
+create index if not exists audit_events_action_created_idx
+  on audit_events (action, created_at desc);
+
+create index if not exists audit_events_actor_created_idx
+  on audit_events (actor_type, created_at desc);
+
+create index if not exists audit_events_created_idx
+  on audit_events (created_at desc);
+
+alter table audit_events enable row level security;
+
+comment on table audit_events is
+  'Append-only audit trail for GM actions and financial mutations. Backend service role only.';
+
+-- ===== 012_audit_append_only.sql =====
+
+-- Enforce append-only audit rows.
+-- The 011 foreign keys used ON DELETE SET NULL, which would mutate audit rows
+-- when an agency or season is deleted. Keep them as soft references instead.
+
+alter table audit_events drop constraint if exists audit_events_agency_id_fkey;
+alter table audit_events drop constraint if exists audit_events_season_id_fkey;
+
+create or replace function audit_events_reject_mutation()
+returns trigger
+language plpgsql
+as $$
+begin
+  raise exception 'audit_events is append-only; % is not allowed', tg_op
+    using errcode = '42501';
+end;
+$$;
+
+drop trigger if exists audit_events_no_update on audit_events;
+create trigger audit_events_no_update
+  before update on audit_events
+  for each row execute function audit_events_reject_mutation();
+
+drop trigger if exists audit_events_no_delete on audit_events;
+create trigger audit_events_no_delete
+  before delete on audit_events
+  for each row execute function audit_events_reject_mutation();
+
+drop trigger if exists audit_events_no_truncate on audit_events;
+create trigger audit_events_no_truncate
+  before truncate on audit_events
+  for each statement execute function audit_events_reject_mutation();
+
+comment on function audit_events_reject_mutation() is
+  'Blocks UPDATE, DELETE, and TRUNCATE on audit_events. Drop triggers only for an intentional maintenance window.';
+
+-- ===== 013_mission_feasibility.sql =====
+
+-- 013_mission_feasibility.sql
+-- Vehicle performance envelope for the deterministic mission feasibility planner.
+-- Additive and safe to re-run. Apply only with owner approval on shared projects.
+
+alter table vehicles
+  add column if not exists vehicle_class text,
+  add column if not exists dry_mass_kg numeric,
+  add column if not exists propellant_mass_kg numeric,
+  add column if not exists payload_capacity_kg numeric,
+  add column if not exists delta_v_budget_m_s numeric,
+  add column if not exists crew_capacity int,
+  add column if not exists performance_note text;
+
+update vehicles
+set
+  vehicle_class = coalesce(vehicle_class, case type
+    when 'sounding-rocket' then 'suborbital'
+    when 'orbital-rocket' then 'orbital'
+    when 'satellite' then 'orbital-payload'
+    when 'capsule' then 'crewed'
+    when 'probe' then 'deep-space'
+    when 'lander' then 'deep-space'
+  end),
+  dry_mass_kg = coalesce(dry_mass_kg, case type
+    when 'sounding-rocket' then 1200
+    when 'orbital-rocket' then 12000
+    when 'satellite' then 800
+    when 'capsule' then 3500
+    when 'probe' then 1000
+    when 'lander' then 6000
+  end),
+  propellant_mass_kg = coalesce(propellant_mass_kg, case type
+    when 'sounding-rocket' then 9800
+    when 'orbital-rocket' then 130000
+    when 'satellite' then 600
+    when 'capsule' then 1500
+    when 'probe' then 1400
+    when 'lander' then 11000
+  end),
+  payload_capacity_kg = coalesce(payload_capacity_kg, case type
+    when 'sounding-rocket' then 150
+    when 'orbital-rocket' then 4500
+    when 'satellite' then 700
+    when 'capsule' then 1500
+    when 'probe' then 900
+    when 'lander' then 3000
+  end),
+  delta_v_budget_m_s = coalesce(delta_v_budget_m_s, case type
+    when 'sounding-rocket' then 2100
+    when 'orbital-rocket' then 9450
+    when 'satellite' then 3800
+    when 'capsule' then 4200
+    when 'probe' then 4200
+    when 'lander' then 5800
+  end),
+  crew_capacity = coalesce(crew_capacity, case type
+    when 'capsule' then 3
+    when 'lander' then 2
+    else 0
+  end)
+where type in (
+  'sounding-rocket',
+  'orbital-rocket',
+  'satellite',
+  'capsule',
+  'probe',
+  'lander'
+);
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'vehicles_class_check'
+  ) then
+    alter table vehicles
+      add constraint vehicles_class_check
+      check (
+        vehicle_class is null
+        or vehicle_class in ('suborbital', 'orbital', 'orbital-payload', 'crewed', 'deep-space')
+      );
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint where conname = 'vehicles_performance_nonnegative_check'
+  ) then
+    alter table vehicles
+      add constraint vehicles_performance_nonnegative_check
+      check (
+        (dry_mass_kg is null or dry_mass_kg >= 0)
+        and (propellant_mass_kg is null or propellant_mass_kg >= 0)
+        and (payload_capacity_kg is null or payload_capacity_kg >= 0)
+        and (delta_v_budget_m_s is null or delta_v_budget_m_s >= 0)
+      );
+  end if;
+
+  if not exists (
+    select 1 from pg_constraint where conname = 'vehicles_crew_capacity_check'
+  ) then
+    alter table vehicles
+      add constraint vehicles_crew_capacity_check
+      check (crew_capacity is null or crew_capacity between 0 and 20);
+  end if;
+end
+$$;
+
+create or replace function vehicles_apply_performance_defaults()
+returns trigger
+language plpgsql
+as $$
+begin
+  if new.vehicle_class is null then
+    new.vehicle_class := case new.type
+      when 'sounding-rocket' then 'suborbital'
+      when 'orbital-rocket' then 'orbital'
+      when 'satellite' then 'orbital-payload'
+      when 'capsule' then 'crewed'
+      when 'probe' then 'deep-space'
+      when 'lander' then 'deep-space'
+    end;
+  end if;
+
+  if new.dry_mass_kg is null then
+    new.dry_mass_kg := case new.type
+      when 'sounding-rocket' then 1200
+      when 'orbital-rocket' then 12000
+      when 'satellite' then 800
+      when 'capsule' then 3500
+      when 'probe' then 1000
+      when 'lander' then 6000
+    end;
+  end if;
+
+  if new.propellant_mass_kg is null then
+    new.propellant_mass_kg := case new.type
+      when 'sounding-rocket' then 9800
+      when 'orbital-rocket' then 130000
+      when 'satellite' then 600
+      when 'capsule' then 1500
+      when 'probe' then 1400
+      when 'lander' then 11000
+    end;
+  end if;
+
+  if new.payload_capacity_kg is null then
+    new.payload_capacity_kg := case new.type
+      when 'sounding-rocket' then 150
+      when 'orbital-rocket' then 4500
+      when 'satellite' then 700
+      when 'capsule' then 1500
+      when 'probe' then 900
+      when 'lander' then 3000
+    end;
+  end if;
+
+  if new.delta_v_budget_m_s is null then
+    new.delta_v_budget_m_s := case new.type
+      when 'sounding-rocket' then 2100
+      when 'orbital-rocket' then 9450
+      when 'satellite' then 3800
+      when 'capsule' then 4200
+      when 'probe' then 4200
+      when 'lander' then 5800
+    end;
+  end if;
+
+  if new.crew_capacity is null then
+    new.crew_capacity := case new.type
+      when 'capsule' then 3
+      when 'lander' then 2
+      else 0
+    end;
+  end if;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists vehicles_apply_performance_defaults on vehicles;
+create trigger vehicles_apply_performance_defaults
+  before insert or update on vehicles
+  for each row execute function vehicles_apply_performance_defaults();
+
+comment on column vehicles.vehicle_class is
+  'Coarse launch/operational class used by mission feasibility checks.';
+comment on column vehicles.dry_mass_kg is
+  'Dry mass in kilograms, excluding propellant and payload.';
+comment on column vehicles.propellant_mass_kg is
+  'Usable propellant mass in kilograms for the vehicle profile.';
+comment on column vehicles.payload_capacity_kg is
+  'Maximum mission payload mass in kilograms.';
+comment on column vehicles.delta_v_budget_m_s is
+  'Abstract mission delta-v budget in metres per second, including launch and orbital manoeuvres.';
+comment on column vehicles.crew_capacity is
+  'Maximum crew seats available for a crewed mission profile.';
+comment on function vehicles_apply_performance_defaults() is
+  'Fills null vehicle performance fields from the built-in type profile on insert/update.';
+
+-- ===== 014_annual_budget.sql =====
+
+-- 014_annual_budget.sql
+-- Annual operating budget reviews, vehicle upkeep, and the settlement ledger.
+-- Additive and safe to re-run. Apply only with owner approval on shared projects.
+
+create table if not exists agency_budget_cycles (
+  id uuid primary key default gen_random_uuid(),
+  agency_id uuid not null references agencies(id) on delete cascade,
+  season_id uuid not null references seasons(id) on delete cascade,
+  cycle_year int not null check (cycle_year between 1900 and 3000),
+  game_date date not null,
+  settled_at timestamptz not null default now(),
+  appropriation_usd bigint not null check (appropriation_usd >= 0),
+  operating_cost_usd bigint not null check (operating_cost_usd >= 0),
+  upkeep_usd bigint not null check (upkeep_usd >= 0),
+  total_cost_usd bigint not null check (total_cost_usd >= 0),
+  net_usd bigint not null,
+  funding_before_usd bigint not null check (funding_before_usd >= 0),
+  funding_after_usd bigint not null check (funding_after_usd >= 0),
+  unpaid_usd bigint not null default 0 check (unpaid_usd >= 0),
+  status text not null default 'APPLIED'
+    check (status in ('APPLIED', 'DEFICIT')),
+  details jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  unique (agency_id, season_id, cycle_year)
+);
+
+create index if not exists agency_budget_cycles_agency_idx
+  on agency_budget_cycles (agency_id, settled_at desc);
+create index if not exists agency_budget_cycles_season_idx
+  on agency_budget_cycles (season_id, cycle_year);
+
+alter table agency_budget_cycles enable row level security;
+
+drop policy if exists agency_budget_cycles_read_own on agency_budget_cycles;
+create policy agency_budget_cycles_read_own on agency_budget_cycles
+  for select to authenticated
+  using (
+    exists (
+      select 1
+      from agencies a
+      where a.user_id = auth.uid()
+        and a.id = agency_budget_cycles.agency_id
+    )
+  );
+
+grant select on agency_budget_cycles to authenticated;
+
+-- Atomic annual settlement. The unique cycle guard keeps worker retries
+-- idempotent; funding can never go below zero, and any shortfall is recorded
+-- as unpaid_usd with a DEFICIT status.
+create or replace function settle_annual_budget(
+  p_agency_id uuid,
+  p_season_id uuid,
+  p_cycle_year int,
+  p_game_date date,
+  p_appropriation_usd bigint,
+  p_operating_cost_usd bigint,
+  p_upkeep_usd bigint,
+  p_details jsonb,
+  p_settled_at timestamptz
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  cycle_id uuid;
+  agency_row agencies%rowtype;
+  total_cost bigint;
+  net_amount bigint;
+  funding_before bigint;
+  funding_after bigint;
+  unpaid bigint;
+  cycle_status text;
+begin
+  if coalesce(p_appropriation_usd, 0) < 0
+     or coalesce(p_operating_cost_usd, 0) < 0
+     or coalesce(p_upkeep_usd, 0) < 0 then
+    raise exception 'Annual budget amounts must be non-negative';
+  end if;
+
+  select * into agency_row
+  from agencies
+  where id = p_agency_id
+  for update;
+
+  if agency_row.id is null then
+    raise exception 'Agency % not found for annual budget', p_agency_id;
+  end if;
+
+  total_cost := coalesce(p_operating_cost_usd, 0) + coalesce(p_upkeep_usd, 0);
+  net_amount := coalesce(p_appropriation_usd, 0) - total_cost;
+  funding_before := coalesce(agency_row.funding_usd, 0);
+  funding_after := greatest(0, funding_before + net_amount);
+  unpaid := greatest(0, -(funding_before + net_amount));
+  cycle_status := case when unpaid > 0 then 'DEFICIT' else 'APPLIED' end;
+
+  insert into agency_budget_cycles (
+    agency_id,
+    season_id,
+    cycle_year,
+    game_date,
+    settled_at,
+    appropriation_usd,
+    operating_cost_usd,
+    upkeep_usd,
+    total_cost_usd,
+    net_usd,
+    funding_before_usd,
+    funding_after_usd,
+    unpaid_usd,
+    status,
+    details
+  )
+  values (
+    p_agency_id,
+    p_season_id,
+    p_cycle_year,
+    p_game_date,
+    coalesce(p_settled_at, now()),
+    coalesce(p_appropriation_usd, 0),
+    coalesce(p_operating_cost_usd, 0),
+    coalesce(p_upkeep_usd, 0),
+    total_cost,
+    net_amount,
+    funding_before,
+    funding_after,
+    unpaid,
+    cycle_status,
+    coalesce(p_details, '{}'::jsonb)
+  )
+  on conflict (agency_id, season_id, cycle_year) do nothing
+  returning id into cycle_id;
+
+  if cycle_id is null then
+    return jsonb_build_object('already_applied', true);
+  end if;
+
+  update agencies
+  set funding_usd = funding_after,
+      updated_at = now()
+  where id = p_agency_id;
+
+  return jsonb_build_object(
+    'already_applied', false,
+    'cycle_id', cycle_id,
+    'funding_before_usd', funding_before,
+    'funding_after_usd', funding_after,
+    'appropriation_usd', coalesce(p_appropriation_usd, 0),
+    'operating_cost_usd', coalesce(p_operating_cost_usd, 0),
+    'upkeep_usd', coalesce(p_upkeep_usd, 0),
+    'total_cost_usd', total_cost,
+    'net_usd', net_amount,
+    'unpaid_usd', unpaid,
+    'status', cycle_status
+  );
+end;
+$$;
+
+revoke all on function settle_annual_budget(
+  uuid, uuid, int, date, bigint, bigint, bigint, jsonb, timestamptz
+) from public, anon, authenticated;
+
+grant execute on function settle_annual_budget(
+  uuid, uuid, int, date, bigint, bigint, bigint, jsonb, timestamptz
+) to service_role;

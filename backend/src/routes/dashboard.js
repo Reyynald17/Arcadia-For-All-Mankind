@@ -1,10 +1,20 @@
 const express = require('express');
+const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
+const { VEHICLE_PERFORMANCE } = require('../services/missionFeasibility');
+const { calculateAnnualBudget } = require('../services/budgetEngine');
 
-module.exports = (supabase) => {
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
+
+  router.use(authenticate);
 
   // Get dashboard data for agency
-  router.get('/:agencyId', async (req, res) => {
+  router.get('/:agencyId', requireOwnedAgency, async (req, res) => {
     try {
       const { agencyId } = req.params;
 
@@ -57,7 +67,11 @@ module.exports = (supabase) => {
         agency,
         agencyRank,
         logs: logs || [],
-        vehicles: vehicles || [],
+        vehicles: (vehicles || []).map((vehicle) => ({
+          ...vehicle,
+          performance_defaults: VEHICLE_PERFORMANCE[vehicle.type] || null,
+        })),
+        annualBudget: calculateAnnualBudget(agency, vehicles || []),
         missions: missions || [],
         missionsError: missionsError ? missionsError.message : null,
         gameDate: new Date().toISOString()

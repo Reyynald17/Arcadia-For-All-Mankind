@@ -1,13 +1,154 @@
 const express = require('express');
+const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const AGMEngine = require('../services/agm');
 const { loadActiveSeason, gameDaysToRealMs, MS_PER_DAY } = require('../services/gameClock');
 const { productionGameDaysForType } = require('../services/productionEngine');
+const { VEHICLE_PERFORMANCE } = require('../services/missionFeasibility');
+const { recordAuditEvent, playerActor } = require('../services/auditLog');
 
-module.exports = (supabase) => {
+const VEHICLE_CLASSES = new Set([
+  'suborbital',
+  'orbital',
+  'orbital-payload',
+  'crewed',
+  'deep-space',
+]);
+
+const PERFORMANCE_NUMERIC_FIELDS = Object.freeze({
+  dry_mass_kg: { label: 'Dry mass', max: 10000000 },
+  propellant_mass_kg: { label: 'Propellant mass', max: 10000000 },
+  payload_capacity_kg: { label: 'Payload capacity', max: 10000000 },
+  delta_v_budget_m_s: { label: 'Delta-v budget', max: 1000000 },
+  crew_capacity: { label: 'Crew capacity', max: 20, integer: true },
+});
+
+const PERFORMANCE_FIELDS = Object.freeze([
+  'vehicle_class',
+  ...Object.keys(PERFORMANCE_NUMERIC_FIELDS),
+]);
+
+const PERFORMANCE_NOTE_MAX_LENGTH = 240;
+
+function requestError(status, message, details) {
+  const error = new Error(message);
+  error.status = status;
+  if (details) error.details = details;
+  return error;
+}
+
+function performanceMigrationMissing(error) {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    /column .* does not exist/i.test(message) ||
+    /Could not find the '.*' column/i.test(message)
+  );
+}
+
+function parsePerformanceUpdate(body) {
+  const updates = {};
+  const fieldErrors = {};
+  let supplied = false;
+
+  if (Object.prototype.hasOwnProperty.call(body, 'vehicle_class')) {
+    supplied = true;
+    const value = String(body.vehicle_class ?? '').trim().toLowerCase();
+    if (!VEHICLE_CLASSES.has(value)) {
+      fieldErrors.vehicle_class = `Vehicle class must be one of: ${[...VEHICLE_CLASSES].join(', ')}`;
+    } else {
+      updates.vehicle_class = value;
+    }
+  }
+
+  for (const [field, rule] of Object.entries(PERFORMANCE_NUMERIC_FIELDS)) {
+    if (!Object.prototype.hasOwnProperty.call(body, field)) continue;
+    supplied = true;
+    const raw = body[field];
+    if (raw === null || raw === undefined || raw === '') {
+      fieldErrors[field] = `${rule.label} is required`;
+      continue;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || value > rule.max) {
+      fieldErrors[field] = `${rule.label} must be between 0 and ${rule.max}`;
+    } else if (rule.integer && !Number.isInteger(value)) {
+      fieldErrors[field] = `${rule.label} must be a whole number`;
+    } else {
+      updates[field] = value;
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, 'performance_note')) {
+    supplied = true;
+    const note = String(body.performance_note ?? '').trim();
+    if (note.length > PERFORMANCE_NOTE_MAX_LENGTH) {
+      fieldErrors.performance_note = `Performance note cannot exceed ${PERFORMANCE_NOTE_MAX_LENGTH} characters`;
+    } else {
+      updates.performance_note = note || null;
+    }
+  }
+
+  if (!supplied) {
+    throw requestError(400, 'No performance fields supplied');
+  }
+  if (Object.keys(fieldErrors).length > 0) {
+    throw requestError(400, Object.values(fieldErrors)[0], { fields: fieldErrors });
+  }
+  return updates;
+}
+
+function performanceSnapshot(vehicle) {
+  if (!vehicle) return null;
+  const snapshot = {};
+  for (const field of [...PERFORMANCE_FIELDS, 'performance_note']) {
+    snapshot[field] = vehicle[field] ?? null;
+  }
+  return snapshot;
+}
+
+function changedPerformanceFields(before, after) {
+  return [...PERFORMANCE_FIELDS, 'performance_note'].filter((field) => {
+    const previous = before?.[field] ?? null;
+    const next = after?.[field] ?? null;
+    if (field === 'vehicle_class' || field === 'performance_note') {
+      return String(previous ?? '') !== String(next ?? '');
+    }
+    if (previous === null || next === null) return previous !== next;
+    return Number(previous) !== Number(next);
+  });
+}
+
+function performanceDelta(beforeData, afterData, fields) {
+  return Object.fromEntries(fields.map((field) => {
+    const previous = beforeData?.[field] ?? null;
+    const next = afterData?.[field] ?? null;
+    if (!['vehicle_class', 'performance_note'].includes(field) && previous !== null && next !== null) {
+      const numericDelta = Number(next) - Number(previous);
+      if (Number.isFinite(numericDelta)) {
+        return [field, numericDelta];
+      }
+    }
+    return [field, next];
+  }));
+}
+
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
+  const writeRateLimit = deps.writeRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 30 });
+
+  router.use(authenticate);
 
   // Queue vehicle production. Completion is handled by the scheduled-event worker.
-  router.post('/vehicle', async (req, res) => {
+  router.post('/vehicle', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const { agencyId, vehicleName, vehicleType } = req.body || {};
 
     if (!agencyId || !vehicleName || !vehicleType) {
@@ -131,6 +272,23 @@ module.exports = (supabase) => {
           }]);
 
         if (logError) throw new Error(`logs: ${logError.message}`);
+
+        await recordAuditEvent(supabase, {
+          ...playerActor(req),
+          seasonId: agency.season_id || season.id,
+          agencyId,
+          action: 'PRODUCTION_STARTED',
+          entityType: 'vehicle',
+          entityId: vehicle.id,
+          beforeData: { funding_usd: Number(agency.funding_usd || 0) },
+          afterData: { funding_usd: newFunding },
+          deltaData: { funding_usd: -productionCost.funding_usd },
+          metadata: {
+            vehicle_name: vehicleName,
+            vehicle_type: vehicleType,
+            production_game_days: productionGameDays,
+          },
+        });
       } catch (error) {
         const rollbackErrors = [];
 
@@ -180,6 +338,110 @@ module.exports = (supabase) => {
       });
     } catch (error) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Edit the persisted performance envelope used by mission feasibility checks.
+  router.patch('/vehicle/:vehicleId/performance', writeRateLimit, requireOwnedAgency, async (req, res) => {
+    const agencyId = String(req.body?.agencyId || '').trim();
+    const vehicleId = String(req.params.vehicleId || '').trim();
+    const resetToDefaults = req.body?.resetToDefaults === true;
+
+    if (!vehicleId) {
+      return res.status(400).json({ error: 'vehicleId is required' });
+    }
+
+    try {
+      const updates = resetToDefaults ? null : parsePerformanceUpdate(req.body || {});
+      const [{ data: vehicle, error: vehicleError }, season] = await Promise.all([
+        supabase
+          .from('vehicles')
+          .select('*')
+          .eq('id', vehicleId)
+          .eq('agency_id', agencyId)
+          .maybeSingle(),
+        loadActiveSeason(supabase),
+      ]);
+
+      if (vehicleError) throw new Error(`vehicles: ${vehicleError.message}`);
+      if (!vehicle) {
+        return res.status(404).json({
+          error: 'VEHICLE_NOT_FOUND',
+          message: 'Vehicle not found for this agency.',
+        });
+      }
+
+      const defaults = VEHICLE_PERFORMANCE[vehicle.type] || null;
+      let patch = updates;
+      if (resetToDefaults) {
+        if (!defaults) {
+          return res.status(400).json({
+            error: 'NO_DEFAULT_PROFILE',
+            message: `Vehicle type ${vehicle.type || 'unknown'} has no default performance profile.`,
+          });
+        }
+        patch = { ...defaults, performance_note: null };
+      }
+
+      const { data: updatedVehicle, error: updateError } = await supabase
+        .from('vehicles')
+        .update(patch)
+        .eq('id', vehicleId)
+        .eq('agency_id', agencyId)
+        .select('*')
+        .single();
+
+      if (updateError) throw updateError;
+      if (!updatedVehicle) {
+        return res.status(404).json({
+          error: 'VEHICLE_NOT_FOUND',
+          message: 'Vehicle not found for this agency.',
+        });
+      }
+
+      const changedFields = changedPerformanceFields(vehicle, updatedVehicle);
+      if (changedFields.length > 0) {
+        const beforeData = performanceSnapshot(vehicle);
+        const afterData = performanceSnapshot(updatedVehicle);
+        await recordAuditEvent(supabase, {
+          ...playerActor(req),
+          seasonId: season.id,
+          agencyId,
+          action: 'VEHICLE_PERFORMANCE_UPDATED',
+          entityType: 'vehicle',
+          entityId: vehicleId,
+          beforeData,
+          afterData,
+          deltaData: performanceDelta(beforeData, afterData, changedFields),
+          metadata: {
+            vehicle_name: updatedVehicle.name,
+            vehicle_type: updatedVehicle.type,
+            reset_to_defaults: resetToDefaults,
+            changed_fields: changedFields,
+          },
+        });
+      }
+
+      res.json({
+        vehicle: updatedVehicle,
+        defaults,
+        changed_fields: changedFields,
+        reset_to_defaults: resetToDefaults,
+      });
+    } catch (error) {
+      if (performanceMigrationMissing(error)) {
+        return res.status(503).json({
+          error: 'PERFORMANCE_MIGRATION_REQUIRED',
+          message: 'Apply migration 013_mission_feasibility.sql first.',
+        });
+      }
+      const status = Number(error.status) || (String(error.code || '') === '23514' ? 400 : 500);
+      const payload = {
+        error: status >= 500 ? 'PERFORMANCE_UPDATE_FAILED' : error.message,
+        message: error.message,
+      };
+      if (error.details) payload.details = error.details;
+      res.status(status).json(payload);
     }
   });
 

@@ -33,7 +33,9 @@ test('calendar maps one real week to one ACD year', async () => {
   const { server, baseUrl } = await startServer(client, () => fixedNow);
 
   try {
-    const response = await fetch(`${baseUrl}/api/calendar`);
+    const response = await fetch(`${baseUrl}/api/calendar`, {
+      headers: { Authorization: 'Bearer test-token' },
+    });
     const body = await response.json();
 
     assert.equal(response.status, 200);
@@ -60,7 +62,9 @@ test('calendar advances the ACD date as real time passes', async () => {
   const { server, baseUrl } = await startServer(client, () => fixedNow);
 
   try {
-    const response = await fetch(`${baseUrl}/api/calendar`);
+    const response = await fetch(`${baseUrl}/api/calendar`, {
+      headers: { Authorization: 'Bearer test-token' },
+    });
     const body = await response.json();
 
     assert.equal(response.status, 200);

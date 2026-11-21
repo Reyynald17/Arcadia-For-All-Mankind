@@ -10,6 +10,7 @@ function createDatabase() {
     agencies: [{
       id: 'agency-1',
       user_id: 'user-1',
+      controller_type: 'player',
       name: 'Valoria Test',
       country: 'Valoria',
       alignment: 'INDEPENDENT',
@@ -149,6 +150,12 @@ test('PATCH profile rejects an incomplete payload', async () => {
 
 test('agency dashboard orders missions by scheduled launch time', async () => {
   const { database, client: baseClient } = createFakeSupabase(createDatabase());
+  database.vehicles.push({
+    id: 'vehicle-1',
+    agency_id: 'agency-1',
+    name: 'Orbiter One',
+    type: 'orbital-rocket',
+  });
   const orders = [];
   const client = {
     ...baseClient,
@@ -165,10 +172,14 @@ test('agency dashboard orders missions by scheduled launch time', async () => {
   const { server, baseUrl } = await startServer(client);
 
   try {
-    const response = await fetch(`${baseUrl}/api/dashboard/agency-1`);
+    const response = await fetch(`${baseUrl}/api/dashboard/agency-1`, {
+      headers: { Authorization: 'Bearer test-token' },
+    });
     const body = await response.json();
 
     assert.equal(response.status, 200);
+    assert.equal(body.vehicles[0].performance_defaults.delta_v_budget_m_s, 9450);
+    assert.equal(body.annualBudget.net_usd, 6360000);
     assert.equal(body.missions.length, 1);
     assert.equal(body.missions[0].id, 'mission-1');
     assert.ok(orders.some(

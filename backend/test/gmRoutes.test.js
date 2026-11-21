@@ -166,6 +166,43 @@ test('GM advance shifts operations earlier and preserves their order', async () 
     assert.ok(new Date(byId['ev-op-1'].execute_at) < new Date(byId['ev-op-2'].execute_at));
     assert.equal(byId['ev-dip'].execute_at, '2026-11-16T01:00:00.000Z');
     assert.equal(byId['ev-done'].execute_at, '2026-11-15T00:00:00.000Z');
+
+    const audit = database.audit_events.find((event) => event.action === 'GM_ADVANCE_TIME');
+    assert.ok(audit, 'advance should be audited');
+    assert.equal(audit.actor_type, 'gm');
+    assert.equal(audit.agency_id, 'agency-1');
+    assert.equal(audit.metadata.updated, 2);
+    assert.deepEqual(audit.metadata.eventIds, ['ev-op-1', 'ev-op-2']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('GM audit endpoint returns recorded events with filters', async () => {
+  const { database, client } = createFakeSupabase(createDatabase());
+  const { server, baseUrl } = await startServer(client);
+
+  try {
+    await fetch(`${baseUrl}/api/gm/advance`, {
+      method: 'POST',
+      headers: gmHeaders(),
+      body: JSON.stringify({ agencyId: 'agency-1', gameDays: 30 }),
+    });
+
+    const response = await fetch(`${baseUrl}/api/gm/audit?agencyId=agency-1&action=GM_ADVANCE_TIME`, {
+      headers: gmHeaders(),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.events.length, 1);
+    assert.equal(body.events[0].action, 'GM_ADVANCE_TIME');
+    assert.equal(database.audit_events.length, 1);
+
+    const unauthorized = await fetch(`${baseUrl}/api/gm/audit`, {
+      headers: gmHeaders('wrong-key'),
+    });
+    assert.equal(unauthorized.status, 401);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

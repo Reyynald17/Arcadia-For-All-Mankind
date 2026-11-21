@@ -43,19 +43,6 @@ const AGMEngine = {
   },
 
   /**
-   * Calculate mission cost (canonical USD).
-   */
-  calculateMissionCost(missionType) {
-    const costs = {
-      'test': { funding_usd: 250000 },
-      'scientific': { funding_usd: 900000 },
-      'manned': { funding_usd: 2200000 },
-      'colonial': { funding_usd: 5000000 },
-    };
-    return costs[missionType] || { funding_usd: 250000 };
-  },
-
-  /**
    * Simulate mission outcome (deterministic)
    */
   simulateMission(agency, vehicle, missionType, rng = Math.random) {

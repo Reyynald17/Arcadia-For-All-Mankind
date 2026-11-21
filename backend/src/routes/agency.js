@@ -1,13 +1,98 @@
 const express = require('express');
-const { createAuthMiddleware } = require('../middleware/auth');
+const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
+const { createGmAuthMiddleware } = require('../middleware/gm');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const { normalizeAgencyProfile } = require('../services/agencyProfile');
+const { recordAuditEvent, gmActor } = require('../services/auditLog');
 
-module.exports = (supabase) => {
+const STAT_COLUMNS = ['science_points', 'funding_usd', 'rp', 'si', 'ipi', 'slr'];
+
+function statSnapshot(agency) {
+  if (!agency) return null;
+  const snapshot = { id: agency.id };
+  for (const column of STAT_COLUMNS) {
+    if (agency[column] !== undefined) snapshot[column] = agency[column];
+  }
+  return snapshot;
+}
+
+function statDelta(before, after) {
+  const delta = {};
+  for (const column of STAT_COLUMNS) {
+    if (before?.[column] === undefined || after?.[column] === undefined) continue;
+    const diff = Number(after[column]) - Number(before[column]);
+    if (diff !== 0) delta[column] = diff;
+  }
+  return delta;
+}
+
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
-  const authenticate = createAuthMiddleware(supabase);
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
+  const gmAuth = deps.gmAuth || createGmAuthMiddleware({ accessKey: deps.gmAccessKey });
+  const writeRateLimit = deps.writeRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 30 });
+
+  // GM-only internal endpoint. Registered before authenticate so it uses the GM key, not a player session.
+  router.post('/:agencyId/update-stats', gmAuth, writeRateLimit, async (req, res) => {
+    try {
+      const { agencyId } = req.params;
+      const { science_points, funding_usd, rp, si, ipi, slr } = req.body;
+
+      const { data: before, error: beforeError } = await supabase
+        .from('agencies')
+        .select(['id', ...STAT_COLUMNS].join(', '))
+        .eq('id', agencyId)
+        .single();
+
+      if (beforeError || !before) {
+        return res.status(404).json({ error: 'Agency not found' });
+      }
+
+      const { data, error } = await supabase
+        .from('agencies')
+        .update({
+          science_points: science_points !== undefined ? science_points : undefined,
+          funding_usd: funding_usd !== undefined ? funding_usd : undefined,
+          rp: rp !== undefined ? rp : undefined,
+          si: si !== undefined ? si : undefined,
+          ipi: ipi !== undefined ? ipi : undefined,
+          slr: slr !== undefined ? slr : undefined
+        })
+        .eq('id', agencyId)
+        .select()
+        .single();
+
+      if (error) {
+        return res.status(400).json({ error: error.message });
+      }
+
+      await recordAuditEvent(supabase, {
+        ...gmActor(req),
+        agencyId,
+        action: 'GM_UPDATE_STATS',
+        entityType: 'agency',
+        entityId: agencyId,
+        beforeData: statSnapshot(before),
+        afterData: statSnapshot(data),
+        deltaData: statDelta(before, data),
+        metadata: { ip: req.ip || null },
+      });
+
+      res.json({ message: 'Agency updated', agency: data });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  router.use(authenticate);
 
   // Complete or update the agency profile (alignment, bloc, launch site)
-  router.patch('/:agencyId/profile', authenticate, async (req, res) => {
+  router.patch('/:agencyId/profile', writeRateLimit, requireOwnedAgency, async (req, res) => {
     try {
       const { agencyId } = req.params;
 
@@ -19,10 +104,6 @@ module.exports = (supabase) => {
 
       if (agencyError || !agency) {
         return res.status(404).json({ error: 'AGENCY_NOT_FOUND', message: 'Agency not found.' });
-      }
-
-      if (String(agency.user_id) !== String(req.authUser.id)) {
-        return res.status(403).json({ error: 'FORBIDDEN_AGENCY', message: 'You do not control this agency.' });
       }
 
       const { profile, error: profileError } = normalizeAgencyProfile(req.body, { requireComplete: true });
@@ -70,6 +151,10 @@ module.exports = (supabase) => {
     try {
       const { userId } = req.params;
 
+      if (String(userId) !== String(req.authUser.id)) {
+        return res.status(403).json({ error: 'FORBIDDEN_AGENCY', message: 'You do not control this agency.' });
+      }
+
       const { data, error } = await supabase
         .from('agencies')
         .select('*')
@@ -81,36 +166,6 @@ module.exports = (supabase) => {
       }
 
       res.json(data);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Update agency stats (internal use)
-  router.post('/:agencyId/update-stats', async (req, res) => {
-    try {
-      const { agencyId } = req.params;
-      const { science_points, funding_usd, rp, si, ipi, slr } = req.body;
-
-      const { data, error } = await supabase
-        .from('agencies')
-        .update({
-          science_points: science_points !== undefined ? science_points : undefined,
-          funding_usd: funding_usd !== undefined ? funding_usd : undefined,
-          rp: rp !== undefined ? rp : undefined,
-          si: si !== undefined ? si : undefined,
-          ipi: ipi !== undefined ? ipi : undefined,
-          slr: slr !== undefined ? slr : undefined
-        })
-        .eq('id', agencyId)
-        .select()
-        .single();
-
-      if (error) {
-        return res.status(400).json({ error: error.message });
-      }
-
-      res.json({ message: 'Agency updated', agency: data });
     } catch (error) {
       res.status(500).json({ error: error.message });
     }

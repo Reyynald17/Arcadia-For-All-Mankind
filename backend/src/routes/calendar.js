@@ -1,4 +1,5 @@
 const express = require('express');
+const { createAuthMiddleware } = require('../middleware/auth');
 const {
   gameDateAt,
   gameDateToRealDate,
@@ -7,8 +8,12 @@ const {
 
 const MS_PER_DAY = 86400000;
 
-module.exports = (supabase, { now = () => new Date() } = {}) => {
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const now = deps.now || (() => new Date());
+
+  router.use(authenticate);
 
   router.get('/', async (req, res) => {
     try {

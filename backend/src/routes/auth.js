@@ -1,11 +1,17 @@
 const express = require('express');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const { normalizeAgencyProfile } = require('../services/agencyProfile');
+const { ensureBudgetReviewScheduled } = require('../services/budgetEngine');
 
-module.exports = (supabase, authClient = supabase) => {
+module.exports = (supabase, authClient = supabase, deps = {}) => {
   const router = express.Router();
+  const authRateLimit = deps.authRateLimit
+    || createRateLimitMiddleware({ windowMs: 15 * 60 * 1000, max: 10 });
+  const refreshRateLimit = deps.refreshRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 60 });
 
   // Register Agency
-  router.post('/register', async (req, res) => {
+  router.post('/register', authRateLimit, async (req, res) => {
     try {
       const { email, password, agencyName, country, culture, history, targets } = req.body;
 
@@ -121,6 +127,12 @@ module.exports = (supabase, authClient = supabase) => {
         return res.status(400).json({ error: agencyError.message });
       }
 
+      try {
+        await ensureBudgetReviewScheduled(supabase, agency[0]);
+      } catch (budgetError) {
+        console.error('Budget bootstrap error:', budgetError.message);
+      }
+
       // Session is required for JWT-protected routes (diplomacy, etc.)
       if (!session) {
         const { data: signInData, error: signInError } = await authClient.auth.signInWithPassword({
@@ -147,7 +159,7 @@ module.exports = (supabase, authClient = supabase) => {
   });
 
   // Login (return session token)
-  router.post('/login', async (req, res) => {
+  router.post('/login', authRateLimit, async (req, res) => {
     try {
       const { email, password } = req.body;
 
@@ -177,7 +189,7 @@ module.exports = (supabase, authClient = supabase) => {
   });
 
   // Refresh an expired access token
-  router.post('/refresh', async (req, res) => {
+  router.post('/refresh', refreshRateLimit, async (req, res) => {
     try {
       const { refresh_token } = req.body;
 

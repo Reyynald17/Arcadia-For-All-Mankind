@@ -1,3 +1,5 @@
+const { recordAuditEvent } = require('./auditLog');
+
 const MISSION_TYPES = new Set(['test', 'scientific', 'manned', 'colonial']);
 
 const MISSION_BASE_REWARDS = Object.freeze({
@@ -238,6 +240,31 @@ async function settleMissionRewards(supabase, mission, { completedAt } = {}) {
     }]);
 
   if (logError) throw new Error(`mission reward log: ${logError.message}`);
+
+  await recordAuditEvent(supabase, {
+    actorType: 'system',
+    actorId: 'mission_rewards',
+    agencyId: mission.agency_id,
+    action: 'MISSION_REWARDED',
+    entityType: 'mission',
+    entityId: mission.id,
+    afterData: {
+      funding_usd: result?.funding_usd ?? null,
+      rp: result?.rp ?? null,
+      science_points: result?.science_points ?? null,
+    },
+    deltaData: {
+      funding_usd: fundingUsd,
+      rp,
+      science_points: sciencePoints,
+    },
+    metadata: {
+      mission_name: mission.name,
+      mission_type: mission.type,
+      contract_id: contract?.id || null,
+      contract_key: contract?.contract_key || null,
+    },
+  });
 
   return {
     funding_usd: fundingUsd,

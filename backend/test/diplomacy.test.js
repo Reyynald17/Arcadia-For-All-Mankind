@@ -106,6 +106,24 @@ function createDatabase() {
   };
 }
 
+function failProposalInserts(client) {
+  return {
+    ...client,
+    from(table) {
+      const query = client.from(table);
+      if (table !== 'diplomatic_proposals') return query;
+      const execute = query.execute.bind(query);
+      query.execute = function executeWithInsertFailure() {
+        if (this.operation === 'insert') {
+          return { data: null, error: { message: 'forced insert failure' } };
+        }
+        return execute();
+      };
+      return query;
+    },
+  };
+}
+
 function fakeAcceptRpc(params, database) {
   const proposal = database.diplomatic_proposals.find((row) => row.id === params.p_proposal_id);
   if (!proposal) throw new Error('PROPOSAL_NOT_FOUND');
@@ -358,6 +376,13 @@ test('createProposal charges funding, schedules expiry, and rejects duplicates a
   assert.equal(created.expiryScheduled, true);
   assert.equal(database.agencies[0].funding_usd, 8500000);
   assert.equal(database.diplomatic_events[0].event_type, 'DIPLOMACY_PROPOSAL_SENT');
+
+  const debit = database.audit_events.find((event) => event.action === 'DIPLOMACY_FUNDING_DEBIT');
+  assert.ok(debit, 'proposal cost should be audited');
+  assert.equal(debit.agency_id, 'west-1');
+  assert.equal(debit.entity_type, 'proposal');
+  assert.equal(debit.delta_data.funding_usd, -1500000);
+  assert.equal(debit.metadata.event, 'PROPOSAL_SENT');
   assert.ok(database.scheduled_events.some((event) => (
     event.event_type === 'DIPLOMACY_PROPOSAL_EXPIRED'
     && event.reference_id === created.proposal.id
@@ -374,6 +399,10 @@ test('createProposal charges funding, schedules expiry, and rejects duplicates a
       season: SEASON,
     }),
     (error) => error.code === 'DUPLICATE_PROPOSAL',
+  );
+  assert.equal(
+    database.audit_events.filter((event) => event.action === 'DIPLOMACY_FUNDING_DEBIT').length,
+    1,
   );
 
   await assert.rejects(
@@ -413,6 +442,35 @@ test('createProposal charges funding, schedules expiry, and rejects duplicates a
     }),
     (error) => error.code === 'NOTE_TOO_LONG',
   );
+});
+
+test('failed proposal insert refunds funding and audits both entries', async () => {
+  const database = createDatabase();
+  database.agencies.push(
+    makeAgency('west-1', { bloc: 'western', controller_type: 'player', user_id: 'user-1', funding_usd: 10000000 }),
+    makeAgency('west-2', { bloc: 'western' }),
+  );
+  const { client } = createFakeSupabase(database);
+  const failingClient = failProposalInserts(client);
+
+  await assert.rejects(
+    createProposal(failingClient, {
+      fromAgencyId: 'west-1',
+      targetAgencyId: 'west-2',
+      durationDays: 30,
+      agreementType: 'cooperation',
+      now: NOW,
+      season: SEASON,
+    }),
+    /forced insert failure/,
+  );
+
+  assert.equal(database.agencies[0].funding_usd, 10000000);
+  const debit = database.audit_events.find((event) => event.action === 'DIPLOMACY_FUNDING_DEBIT');
+  const refund = database.audit_events.find((event) => event.action === 'DIPLOMACY_FUNDING_REFUND');
+  assert.equal(debit.delta_data.funding_usd, -1500000);
+  assert.equal(refund.delta_data.funding_usd, 1500000);
+  assert.equal(refund.metadata.event, 'PROPOSAL_ROLLBACK');
 });
 
 test('proposal reject, withdraw, and expiry update state and audit log once', async () => {
@@ -494,6 +552,13 @@ test('counter creates a reverse proposal and enforces the counter depth limit', 
   assert.ok(database.diplomatic_events.some((event) => (
     event.event_type === 'DIPLOMACY_PROPOSAL_COUNTERED'
   )));
+
+  const debit = database.audit_events.find((event) => (
+    event.action === 'DIPLOMACY_FUNDING_DEBIT' && event.entity_id === 'proposal-1'
+  ));
+  assert.ok(debit, 'counter cost should be audited');
+  assert.equal(debit.delta_data.funding_usd, -750000);
+  assert.equal(debit.metadata.event, 'PROPOSAL_COUNTERED');
 
   await assert.rejects(
     respondToProposal(client, {

@@ -7,6 +7,20 @@ const KEY_STORAGE = 'afm_gm_key'
 const DAY_MS = 86400000
 const PRESETS = [1, 7, 30, 90, 365]
 
+const AUDIT_ACTION_LABELS = {
+  GM_UPDATE_STATS: 'GM ubah stats',
+  GM_ADVANCE_TIME: 'GM percepat waktu',
+  RESEARCH_STARTED: 'Riset dimulai',
+  STATIC_FIRE_STARTED: 'Static fire dijadwalkan',
+  PRODUCTION_STARTED: 'Produksi dimulai',
+  MISSION_SCHEDULED: 'Misi dijadwalkan',
+  GRANT_CLAIMED: 'Grant diklaim',
+  MISSION_REWARDED: 'Reward misi dibayar',
+  MISSION_STATS_UPDATE: 'Stats misi diterapkan',
+  DIPLOMACY_FUNDING_DEBIT: 'Biaya diplomasi',
+  DIPLOMACY_FUNDING_REFUND: 'Refund diplomasi',
+}
+
 const EVENT_LABELS = {
   PRODUCTION_COMPLETE: 'Produksi selesai',
   ROLLOUT_COMPLETE: 'Rollout selesai',
@@ -55,6 +69,25 @@ function formatDuration(ms) {
   const seconds = total % 60
   if (days > 0) return `${days}D ${pad(hours)}H ${pad(minutes)}M`
   return `${pad(hours)}H ${pad(minutes)}M ${pad(seconds)}S`
+}
+
+function formatAuditDelta(delta) {
+  if (!delta) return ''
+  const parts = []
+  if (Number(delta.funding_usd)) {
+    const amount = Number(delta.funding_usd)
+    parts.push(`${amount > 0 ? '+' : '-'}${formatUsd(Math.abs(amount))}`)
+  }
+  if (Number(delta.science_points)) {
+    parts.push(`${delta.science_points > 0 ? '+' : ''}${delta.science_points} SP`)
+  }
+  if (Number(delta.rp)) {
+    parts.push(`${delta.rp > 0 ? '+' : ''}${delta.rp} RP`)
+  }
+  if (Number(delta.events_shifted)) {
+    parts.push(`${delta.events_shifted} event`)
+  }
+  return parts.join(' // ')
 }
 
 async function gmRequest(path, { key, method = 'GET', body } = {}) {
@@ -120,6 +153,9 @@ export default function GmPanel() {
   const [customDays, setCustomDays] = useState('')
   const [flushArmed, setFlushArmed] = useState(false)
   const [nowTick, setNowTick] = useState(Date.now())
+  const [auditEvents, setAuditEvents] = useState([])
+  const [auditLoading, setAuditLoading] = useState(false)
+  const [auditError, setAuditError] = useState('')
 
   const describeError = (err) => {
     if (err?.code === 'GM_DISABLED') {
@@ -165,6 +201,28 @@ export default function GmPanel() {
     }
   }, [])
 
+  const loadAudit = useCallback(async (accessKey, agencyId) => {
+    if (!accessKey || !agencyId) return
+    setAuditLoading(true)
+    try {
+      const payload = await gmRequest(
+        `/gm/audit?agencyId=${encodeURIComponent(agencyId)}&limit=30`,
+        { key: accessKey },
+      )
+      setAuditEvents(payload.events || [])
+      setAuditError('')
+    } catch (err) {
+      setAuditEvents([])
+      setAuditError(
+        err?.status === 503
+          ? 'Tabel audit belum ada. Jalankan migration 011_audit_events.sql.'
+          : describeError(err),
+      )
+    } finally {
+      setAuditLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     if (key) loadAgencies(key)
   }, [key, loadAgencies])
@@ -172,9 +230,13 @@ export default function GmPanel() {
   useEffect(() => {
     if (!key || !selectedId) return undefined
     loadState(key, selectedId)
-    const timer = setInterval(() => loadState(key, selectedId), 5000)
+    loadAudit(key, selectedId)
+    const timer = setInterval(() => {
+      loadState(key, selectedId)
+      loadAudit(key, selectedId)
+    }, 5000)
     return () => clearInterval(timer)
-  }, [key, selectedId, loadState])
+  }, [key, selectedId, loadState, loadAudit])
 
   useEffect(() => {
     const timer = setInterval(() => setNowTick(Date.now()), 1000)
@@ -204,6 +266,8 @@ export default function GmPanel() {
     setError('')
     setNotice('')
     setAgencyState(null)
+    setAuditEvents([])
+    setAuditError('')
   }
 
   const forgetKey = () => {
@@ -216,6 +280,8 @@ export default function GmPanel() {
     setAgencyState(null)
     setError('')
     setNotice('')
+    setAuditEvents([])
+    setAuditError('')
   }
 
   const runAdvance = async ({ gameDays = null, mode = 'shift' } = {}) => {
@@ -236,6 +302,7 @@ export default function GmPanel() {
         )
       }
       await loadState(key, selectedId)
+      await loadAudit(key, selectedId)
     } catch (err) {
       setError(describeError(err))
     } finally {
@@ -432,7 +499,10 @@ export default function GmPanel() {
               onClick={() => {
                 if (key) {
                   loadAgencies(key)
-                  if (selectedId) loadState(key, selectedId)
+                  if (selectedId) {
+                    loadState(key, selectedId)
+                    loadAudit(key, selectedId)
+                  }
                 }
               }}
               className="ml-auto border border-carbon-border px-3 py-1.5 text-[10px] uppercase tracking-wider text-neutral-300 hover:text-flight-amber hover:border-flight-amber/50 bezier-fast flex items-center gap-1.5"
@@ -650,6 +720,53 @@ export default function GmPanel() {
             </div>
           </section>
         </div>
+
+        <section className="border border-carbon-border bg-carbon-surface">
+          <PanelHead
+            title="Audit Trail"
+            right={auditLoading ? 'SYNCING' : `${auditEvents.length} TERBARU`}
+          />
+          {auditError ? (
+            <div className="px-3 py-4 text-[10px] text-alert-red">{auditError}</div>
+          ) : auditEvents.length === 0 ? (
+            <div className="px-3 py-6 text-center text-[10px] uppercase text-neutral-400">
+              // Belum ada audit event
+            </div>
+          ) : (
+            <div className="divide-y divide-carbon-border max-h-[300px] overflow-y-auto custom-scroll">
+              {auditEvents.map((event) => {
+                const deltaText = formatAuditDelta(event.delta_data)
+                const eventLabel = AUDIT_ACTION_LABELS[event.action] || event.action
+                return (
+                  <div key={event.id} className="px-3 py-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-neutral-100 min-w-[180px]">
+                      {eventLabel}
+                    </span>
+                    <span className="text-[9px] uppercase tracking-wider text-neutral-400">
+                      {event.actor_type}{event.actor_id ? ` // ${event.actor_id}` : ''}
+                    </span>
+                    {event.entity_type && (
+                      <span className="text-[9px] text-neutral-400">
+                        {event.entity_type} {String(event.entity_id || '').slice(0, 8)}
+                      </span>
+                    )}
+                    {deltaText && (
+                      <span className="text-[9px] tabular-nums text-flight-amber">{deltaText}</span>
+                    )}
+                    {event.metadata?.event && (
+                      <span className="text-[9px] uppercase tracking-wider text-neutral-500">
+                        {event.metadata.event}
+                      </span>
+                    )}
+                    <span className="ml-auto text-[9px] tabular-nums text-neutral-400">
+                      {formatRealTime(event.created_at)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </section>
       </main>
     </div>
   )

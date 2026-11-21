@@ -17,6 +17,10 @@ const {
   handleNpcTick,
   ensureNpcTickScheduled,
 } = require('./services/diplomacyEngine');
+const {
+  handleBudgetReview,
+  ensureBudgetSchedules,
+} = require('./services/budgetEngine');
 
 const app = express();
 app.disable('x-powered-by');
@@ -52,6 +56,7 @@ const eventQueue = createEventQueue({
     DIPLOMACY_PROPOSAL_EXPIRED: (event) => handleProposalExpired(supabase, event),
     DIPLOMACY_AGREEMENT_EXPIRED: (event) => handleAgreementExpired(supabase, event),
     DIPLOMACY_NPC_TICK: (event) => handleNpcTick(supabase, event),
+    BUDGET_REVIEW: (event) => handleBudgetReview(supabase, event),
   },
   intervalMs: Number(process.env.EVENT_QUEUE_INTERVAL_MS) || 5000,
   batchSize: Number(process.env.EVENT_QUEUE_BATCH_SIZE) || 10,
@@ -91,6 +96,9 @@ const server = app.listen(PORT, () => {
     ensureNpcTickScheduled(supabase)
       .then((event) => console.log(`[diplomacy] npc tick scheduled: ${event.id}`))
       .catch((error) => console.error(`[diplomacy] npc tick bootstrap failed: ${error.message}`));
+    ensureBudgetSchedules(supabase)
+      .then((result) => console.log(`[budget] schedules ready: ${result.scheduled} new`))
+      .catch((error) => console.error(`[budget] bootstrap failed: ${error.message}`));
   }
 });
 

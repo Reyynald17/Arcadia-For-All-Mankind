@@ -22,17 +22,77 @@ const VEHICLE_COST_USD = {
 }
 
 const VEHICLE_SPEC = {
-  'sounding-rocket': '12.4 T // 240 kN // 2,100 m/s',
-  'orbital-rocket': '142.8 T // 1,850 kN // 9,450 m/s',
-  satellite: '1.8 T // — // —',
-  capsule: '5.2 T // — // 3,600 m/s',
-  probe: '2.6 T // — // 4,200 m/s',
-  lander: '18.7 T // — // 5,800 m/s',
+  'sounding-rocket': '11.0 T // 240 kN // 2,100 m/s',
+  'orbital-rocket': '142.0 T // 1,850 kN // 9,450 m/s',
+  satellite: '1.4 T // — // 3,800 m/s',
+  capsule: '5.0 T // — // 4,200 m/s',
+  probe: '2.4 T // — // 4,200 m/s',
+  lander: '17.0 T // — // 5,800 m/s',
 }
+
+const VEHICLE_CLASS_OPTIONS = [
+  { value: 'suborbital', label: 'SUBORBITAL' },
+  { value: 'orbital', label: 'ORBITAL' },
+  { value: 'orbital-payload', label: 'ORBITAL PAYLOAD' },
+  { value: 'crewed', label: 'CREWED' },
+  { value: 'deep-space', label: 'DEEP SPACE' },
+]
+
+const PERFORMANCE_FORM_FIELDS = [
+  { key: 'dry_mass_kg', label: 'Dry Mass', unit: 'KG', max: 10000000 },
+  { key: 'propellant_mass_kg', label: 'Propellant', unit: 'KG', max: 10000000 },
+  { key: 'payload_capacity_kg', label: 'Payload Cap.', unit: 'KG', max: 10000000 },
+  { key: 'delta_v_budget_m_s', label: 'Delta-V', unit: 'M/S', max: 1000000 },
+  { key: 'crew_capacity', label: 'Crew', unit: 'ORANG', max: 20, integer: true },
+]
+
+const PERFORMANCE_FIELDS = [
+  'vehicle_class',
+  ...PERFORMANCE_FORM_FIELDS.map((field) => field.key),
+]
+
+const PERFORMANCE_NOTE_MAX_LENGTH = 240
 
 const num = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0)
 const pad = (value) => String(value).padStart(2, '0')
 const toUpper = (value) => String(value ?? '').toUpperCase()
+
+function formatInt(value) {
+  return Math.round(num(value)).toLocaleString('en-US')
+}
+
+function performanceFormFrom(vehicle) {
+  return {
+    vehicle_class: String(vehicle?.vehicle_class || ''),
+    ...Object.fromEntries(
+      PERFORMANCE_FORM_FIELDS.map((field) => [
+        field.key,
+        vehicle?.[field.key] === null || vehicle?.[field.key] === undefined
+          ? ''
+          : String(vehicle[field.key]),
+      ]),
+    ),
+    performance_note: String(vehicle?.performance_note || ''),
+  }
+}
+
+function performanceFieldIsOverride(vehicle, field) {
+  const defaults = vehicle?.performance_defaults
+  if (!defaults) return false
+  const current = vehicle?.[field]
+  const reference = defaults?.[field]
+  if (field === 'vehicle_class') {
+    return String(current || '') !== String(reference || '')
+  }
+  if (current === null || current === undefined || reference === null || reference === undefined) {
+    return (current ?? null) !== (reference ?? null)
+  }
+  return Math.abs(Number(current) - Number(reference)) > 1e-9
+}
+
+function performanceOverrideFields(vehicle) {
+  return PERFORMANCE_FIELDS.filter((field) => performanceFieldIsOverride(vehicle, field))
+}
 
 function formatUsd(value) {
   const amount = num(value)
@@ -102,6 +162,10 @@ export default function Engineering({
   const [researchBusy, setResearchBusy] = useState(null)
   const [staticFireBusy, setStaticFireBusy] = useState(null)
   const [productionBusy, setProductionBusy] = useState(false)
+  const [performanceVehicleId, setPerformanceVehicleId] = useState('')
+  const [performanceDraft, setPerformanceDraft] = useState(null)
+  const [performanceBusy, setPerformanceBusy] = useState(false)
+  const [performanceError, setPerformanceError] = useState('')
 
   const loadTechnologies = useCallback(async () => {
     if (!agencyId) return
@@ -127,6 +191,21 @@ export default function Engineering({
   useEffect(() => {
     loadTechnologies()
   }, [loadTechnologies])
+
+  const performanceVehicle = useMemo(
+    () => vehicles.find((vehicle) => vehicle.id === performanceVehicleId) || vehicles[0] || null,
+    [performanceVehicleId, vehicles],
+  )
+  const performanceOverrides = useMemo(
+    () => performanceOverrideFields(performanceVehicle),
+    [performanceVehicle],
+  )
+  const performanceNotice = performanceVehicle?.performance_note || ''
+
+  useEffect(() => {
+    setPerformanceDraft(performanceVehicle ? performanceFormFrom(performanceVehicle) : null)
+    setPerformanceError('')
+  }, [performanceVehicle])
 
   const techById = useMemo(
     () => new Map(technologies.map((tech) => [tech.node_id, tech])),
@@ -191,6 +270,76 @@ export default function Engineering({
     vehicles.find((vehicle) => !['manufacturing', 'assigned'].includes(vehicle.status)) || null
   const blueprintReliability =
     primaryVehicle && primaryVehicle.type === selectedType ? Math.round(num(primaryVehicle.reliability)) : 70
+
+  const setPerformanceValue = (field, value) => {
+    setPerformanceDraft((current) => (current ? { ...current, [field]: value } : current))
+  }
+
+  const saveVehiclePerformance = async (resetToDefaults = false) => {
+    if (!agencyId || !performanceVehicle || !performanceDraft || performanceBusy) return
+
+    if (!resetToDefaults) {
+      if (!VEHICLE_CLASS_OPTIONS.some((option) => option.value === performanceDraft.vehicle_class)) {
+        setPerformanceError('Kelas wahana tidak valid')
+        return
+      }
+      for (const field of PERFORMANCE_FORM_FIELDS) {
+        const raw = String(performanceDraft[field.key] ?? '').trim()
+        if (!raw) {
+          setPerformanceError(`${field.label} wajib diisi`)
+          return
+        }
+        const value = Number(raw)
+        if (!Number.isFinite(value) || value < 0 || value > field.max) {
+          setPerformanceError(`${field.label} harus antara 0 dan ${formatInt(field.max)}`)
+          return
+        }
+        if (field.integer && !Number.isInteger(value)) {
+          setPerformanceError(`${field.label} harus bilangan bulat`)
+          return
+        }
+      }
+    }
+
+    setPerformanceError('')
+    setPerformanceBusy(true)
+    try {
+      const body = { agencyId }
+      if (resetToDefaults) {
+        body.resetToDefaults = true
+      } else {
+        body.vehicle_class = performanceDraft.vehicle_class
+        for (const field of PERFORMANCE_FORM_FIELDS) {
+          body[field.key] = Number(performanceDraft[field.key])
+        }
+        body.performance_note = performanceDraft.performance_note.trim()
+      }
+
+      const result = await apiRequest(
+        `/production/vehicle/${performanceVehicle.id}/performance`,
+        { method: 'PATCH', body: JSON.stringify(body) },
+      )
+      const updatedName = result.vehicle?.name || performanceVehicle.name
+      const changedCount = Array.isArray(result.changed_fields) ? result.changed_fields.length : 0
+      pushLine(
+        'ok',
+        `> VEHICLE PERFORMANCE ${resetToDefaults ? 'RESET' : 'UPDATED'}: ${toUpper(updatedName)} // ${changedCount} FIELD`,
+      )
+      pushLine(
+        'data',
+        `> DV ${formatInt(result.vehicle?.delta_v_budget_m_s)} M/S // PAYLOAD ${formatInt(result.vehicle?.payload_capacity_kg)} KG // CREW ${formatInt(result.vehicle?.crew_capacity)}`,
+      )
+      notify(`${resetToDefaults ? 'PERFORMA DIRESET' : 'PERFORMA DISIMPAN'}: ${toUpper(updatedName)}`)
+      await onRefresh()
+    } catch (err) {
+      const message = err.message || 'UNKNOWN'
+      setPerformanceError(message)
+      pushLine('error', `> VEHICLE PERFORMANCE ERROR: ${toUpper(message)}`)
+      notify(`PERFORMA GAGAL: ${toUpper(message)}`)
+    } finally {
+      setPerformanceBusy(false)
+    }
+  }
 
   const startResearch = async (row) => {
     if (!agencyId || researchBusy) return
@@ -448,6 +597,184 @@ export default function Engineering({
               <span>{sciencePoints} SP // {formatUsd(fundingUsd)}</span>
             </div>
             </div>
+          </div>
+
+          <div className="border-t border-carbon-border">
+            <div className="flex items-start justify-between gap-3 px-3 py-2">
+              <div className="min-w-0">
+                <div className="font-headline text-[11px] font-bold uppercase tracking-widest text-neutral-200">
+                  Konfigurasi Performa
+                </div>
+                <div className="text-[8px] uppercase tracking-wider text-neutral-400">
+                  Override DB dipakai untuk feasibility, biaya, dan durasi misi
+                </div>
+              </div>
+              <span className="text-[9px] whitespace-nowrap text-flight-amber tabular-nums">
+                {performanceVehicle ? `${performanceOverrides.length} OVERRIDE` : 'TANPA UNIT'}
+              </span>
+            </div>
+
+            {!performanceVehicle || !performanceDraft ? (
+              <div className="px-3 pb-4 text-[10px] uppercase text-neutral-400">
+                Belum ada wahana untuk dikonfigurasi
+              </div>
+            ) : (
+              <div className="px-3 pb-3 grid grid-cols-1 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)] gap-3">
+                <div className="min-w-0">
+                  <div className="mb-1 text-[9px] uppercase tracking-wider text-neutral-400">
+                    Pilih Wahana
+                  </div>
+                  <div className="max-h-[248px] overflow-y-auto custom-scroll border border-carbon-border divide-y divide-carbon-border">
+                    {vehicles.map((vehicle) => {
+                      const selected = vehicle.id === performanceVehicle.id
+                      const overrides = performanceOverrideFields(vehicle).length
+                      return (
+                        <button
+                          key={vehicle.id}
+                          type="button"
+                          onClick={() => setPerformanceVehicleId(vehicle.id)}
+                          aria-pressed={selected}
+                          className={`w-full px-2 py-1.5 text-left bezier-fast ${
+                            selected
+                              ? 'bg-flight-amber/10 border-l-2 border-l-flight-amber'
+                              : 'border-l-2 border-l-transparent hover:bg-carbon-container'
+                          }`}
+                        >
+                          <span className="block truncate text-[10px] font-bold uppercase text-neutral-100">
+                            {toUpper(vehicle.name)}
+                          </span>
+                          <span className="flex items-center justify-between gap-2 text-[8px] uppercase text-neutral-400">
+                            <span className="truncate">
+                              {VEHICLE_LABEL[vehicle.type] || toUpper(vehicle.type)}
+                            </span>
+                            <span className={`whitespace-nowrap ${overrides > 0 ? 'text-flight-amber' : ''}`}>
+                              {overrides > 0 ? `${overrides} OVR` : vehicleStateLabel(vehicle)}
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  <div className="mt-1 truncate text-[8px] uppercase tracking-wide text-neutral-400">
+                    {performanceVehicle.performance_defaults
+                      ? `Bawaan ${formatInt(performanceVehicle.performance_defaults.delta_v_budget_m_s)} M/S // ${formatInt(performanceVehicle.performance_defaults.payload_capacity_kg)} KG`
+                      : 'Profil bawaan tidak tersedia'}
+                  </div>
+                </div>
+
+                <form
+                  className="min-w-0 space-y-2"
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    saveVehiclePerformance(false)
+                  }}
+                >
+                  <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+                    <label className="flex flex-col gap-1 text-[9px] uppercase text-neutral-400">
+                      <span className="flex items-center justify-between gap-1">
+                        <span>Kelas</span>
+                        {performanceFieldIsOverride(performanceVehicle, 'vehicle_class') && (
+                          <span className="text-flight-amber">OVR</span>
+                        )}
+                      </span>
+                      <select
+                        value={performanceDraft.vehicle_class}
+                        onChange={(event) => setPerformanceValue('vehicle_class', event.target.value)}
+                        className="h-8 w-full bg-carbon-bg border border-carbon-border px-1.5 text-[9px] text-neutral-100 focus:border-flight-amber"
+                      >
+                        {VEHICLE_CLASS_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {PERFORMANCE_FORM_FIELDS.map((field) => (
+                      <label
+                        key={field.key}
+                        className="flex flex-col gap-1 text-[9px] uppercase text-neutral-400"
+                      >
+                        <span className="flex items-center justify-between gap-1">
+                          <span className="truncate">
+                            {field.label} <span className="text-[8px] text-neutral-500">{field.unit}</span>
+                          </span>
+                          {performanceFieldIsOverride(performanceVehicle, field.key) && (
+                            <span className="text-flight-amber">OVR</span>
+                          )}
+                        </span>
+                        <input
+                          type="number"
+                          inputMode="decimal"
+                          min="0"
+                          max={field.max}
+                          step={field.integer ? '1' : 'any'}
+                          value={performanceDraft[field.key]}
+                          onChange={(event) => setPerformanceValue(field.key, event.target.value)}
+                          className="h-8 w-full bg-carbon-bg border border-carbon-border px-2 text-[10px] text-neutral-100 tabular-nums focus:border-flight-amber"
+                        />
+                      </label>
+                    ))}
+                  </div>
+
+                  <label className="flex flex-col gap-1 text-[9px] uppercase text-neutral-400">
+                    <span className="flex items-center justify-between gap-1">
+                      <span>Catatan Performa</span>
+                      <span className="text-[8px] normal-case text-neutral-500">
+                        {performanceDraft.performance_note.length}/{PERFORMANCE_NOTE_MAX_LENGTH}
+                      </span>
+                    </span>
+                    <input
+                      type="text"
+                      value={performanceDraft.performance_note}
+                      onChange={(event) => setPerformanceValue('performance_note', event.target.value)}
+                      maxLength={PERFORMANCE_NOTE_MAX_LENGTH}
+                      placeholder="Alasan override / catatan test envelope"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="h-8 w-full bg-carbon-bg border border-carbon-border px-2 text-[10px] text-neutral-100 placeholder:text-neutral-500 focus:border-flight-amber"
+                    />
+                  </label>
+
+                  {performanceError && (
+                    <div className="border border-alert-red/40 bg-alert-red/10 px-2 py-1.5 text-[9px] uppercase text-alert-red">
+                      {performanceError}
+                    </div>
+                  )}
+
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-t border-carbon-border pt-2">
+                    <div className="min-w-0 truncate text-[8px] uppercase tracking-wide text-neutral-400">
+                      {performanceOverrides.length > 0
+                        ? `${performanceOverrides.length} field override aktif`
+                        : 'Mengikuti profil bawaan'}
+                      {performanceNotice ? ` // NOTE: ${performanceNotice}` : ''}
+                    </div>
+                    <div className="flex items-center gap-2 sm:justify-end">
+                      <button
+                        type="button"
+                        onClick={() => saveVehiclePerformance(true)}
+                        disabled={performanceBusy}
+                        className="px-2 py-2 border border-carbon-border text-[9px] font-headline font-bold uppercase tracking-wider text-neutral-300 bezier-fast hover:border-flight-amber hover:text-flight-amber disabled:cursor-wait disabled:opacity-50"
+                      >
+                        Reset Bawaan
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={performanceBusy}
+                        className={`px-3 py-2 border text-[9px] font-headline font-bold uppercase tracking-wider flex items-center gap-1.5 bezier-fast ${
+                          performanceBusy
+                            ? 'bg-flight-amber/20 text-flight-amber border-flight-amber/40 cursor-wait'
+                            : 'bg-flight-amber text-black border-flight-amber hover:bg-flight-amber-dim'
+                        }`}
+                      >
+                        <span className="material-symbols-outlined text-sm">save</span>
+                        {performanceBusy ? 'Menyimpan...' : 'Simpan Override'}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            )}
           </div>
         </aside>
         )}

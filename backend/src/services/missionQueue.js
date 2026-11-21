@@ -1,6 +1,10 @@
 const { ACTIVE_MISSION_STATUSES } = require('./missionPlan');
 const { MissionScheduleError, scheduleMission } = require('./missionScheduler');
 const {
+  evaluateMissionFeasibility,
+  feasibilityErrorMessage,
+} = require('./missionFeasibility');
+const {
   MISSION_TYPES,
   EconomyError,
   getContract,
@@ -11,10 +15,11 @@ const READY_VEHICLE_STATUSES = new Set(['testing', 'nominal', 'retired']);
 const QUEUE_ACTIVE_STATUSES = ['QUEUED', 'ACTIVE'];
 
 class MissionQueueError extends Error {
-  constructor(status, message) {
+  constructor(status, message, details = null) {
     super(message);
     this.name = 'MissionQueueError';
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -153,6 +158,20 @@ async function enqueueMission({
     throw new MissionQueueError(400, 'Vehicle already has a queued or active mission');
   }
 
+  const feasibility = evaluateMissionFeasibility({
+    agency,
+    vehicle,
+    missionType,
+    targetInclinationDeg,
+  });
+  if (!feasibility.feasible) {
+    throw new MissionQueueError(
+      400,
+      feasibilityErrorMessage(feasibility),
+      { feasibility },
+    );
+  }
+
   const { data: queueItem, error: insertError } = await supabase
     .from('mission_queue')
     .insert([{
@@ -180,6 +199,7 @@ async function enqueueMission({
   const promotion = await promoteNextMission(supabase, agencyId);
   return {
     queueItem: presentQueueItem(queueItem),
+    feasibility,
     promotion,
   };
 }

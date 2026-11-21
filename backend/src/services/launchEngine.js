@@ -13,6 +13,7 @@ const {
   planLaunchSchedule,
 } = require('./missionPlan');
 const { settleMissionRewards } = require('./economyEngine');
+const { recordAuditEvent } = require('./auditLog');
 const {
   completeQueueItem,
   promoteNextMission,
@@ -203,7 +204,12 @@ async function handleLaunchIgnition(supabase, event) {
       epochRealAt: completedAt,
     })
     : null;
-  const orbitGameDays = simulation.success ? orbitOperationsGameDays(mission.type) : null;
+  const plannedOrbitGameDays = Number(mission.telemetry?.duration?.orbit_operations_game_days);
+  const orbitGameDays = simulation.success
+    ? (Number.isFinite(plannedOrbitGameDays) && plannedOrbitGameDays > 0
+      ? plannedOrbitGameDays
+      : orbitOperationsGameDays(mission.type))
+    : null;
   const orbitCompletesAt = simulation.success
     ? new Date(
       new Date(completedAt).getTime() + gameDaysToRealMs(orbitGameDays, multiplier),
@@ -297,6 +303,43 @@ async function handleLaunchIgnition(supabase, event) {
     .update(newStats)
     .eq('id', mission.agency_id);
   if (statsError) throw new Error(`LAUNCH_IGNITION agency stats: ${statsError.message}`);
+
+  await recordAuditEvent(supabase, {
+    actorType: 'system',
+    actorId: 'launch_engine',
+    seasonId: mission.season_id || null,
+    agencyId: mission.agency_id,
+    action: 'MISSION_STATS_UPDATE',
+    entityType: 'mission',
+    entityId: mission.id,
+    beforeData: {
+      rp: Number(agency.rp || 0),
+      science_points: Number(agency.science_points || 0),
+      ipi: Number(agency.ipi || 0),
+      si: Number(agency.si || 0),
+      total_launches: Number(agency.total_launches || 0),
+      successful_launches: Number(agency.successful_launches || 0),
+    },
+    afterData: {
+      rp: newStats.rp,
+      science_points: newStats.science_points,
+      ipi: newStats.ipi,
+      si: newStats.si,
+      total_launches: newStats.total_launches,
+      successful_launches: newStats.successful_launches,
+    },
+    deltaData: {
+      rp: simulation.rpGain,
+      science_points: simulation.scienceGain,
+      ipi: simulation.ipiChange,
+      si: simulation.siChange,
+    },
+    metadata: {
+      mission_name: mission.name,
+      mission_type: mission.type,
+      success: simulation.success,
+    },
+  });
 
   const { error: vehicleUpdateError } = await supabase
     .from('vehicles')

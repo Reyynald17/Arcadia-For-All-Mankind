@@ -16,6 +16,10 @@ const expectedFiles = [
   '008_economy.sql',
   '009_economy_rls.sql',
   '010_contract_mission_link.sql',
+  '011_audit_events.sql',
+  '012_audit_append_only.sql',
+  '013_mission_feasibility.sql',
+  '014_annual_budget.sql',
 ];
 const requiredTables = [
   'seasons',
@@ -65,7 +69,9 @@ function readMigration(file) {
 const sql = Object.fromEntries(expectedFiles.map((file) => [file, readMigration(file)]));
 const combined = Object.values(sql).join('\n');
 
-if (/\b(drop\s+table|truncate|delete\s+from|drop\s+schema)\b/i.test(combined)) {
+const destructive = /\b(drop\s+table|delete\s+from|drop\s+schema)\b/i.test(combined)
+  || /\btruncate\s+(?!on\b)(table\s+)?[a-z_"]/i.test(combined);
+if (destructive) {
   errors.push('Migrations contain a destructive statement (DROP TABLE/TRUNCATE/DELETE/DROP SCHEMA).');
 }
 
@@ -331,6 +337,102 @@ if (!/mission_id\s*=\s*p_mission_id/i.test(sql['010_contract_mission_link.sql'])
 }
 if (!/update\s+agency_contracts/i.test(sql['010_contract_mission_link.sql'])) {
   errors.push('010 is missing the agency_contracts backfill.');
+}
+
+if (!/create\s+table\s+if\s+not\s+exists\s+audit_events\b/i.test(sql['011_audit_events.sql'])) {
+  errors.push('011 is missing CREATE TABLE IF NOT EXISTS audit_events.');
+}
+for (const column of [
+  'actor_type',
+  'actor_id',
+  'action',
+  'entity_type',
+  'entity_id',
+  'before_data',
+  'after_data',
+  'delta_data',
+  'metadata',
+  'agency_id',
+  'season_id',
+  'created_at',
+]) {
+  if (!new RegExp(`\\b${column}\\b`, 'i').test(sql['011_audit_events.sql'])) {
+    errors.push(`011 is missing audit_events.${column}.`);
+  }
+}
+if (!/alter\s+table\s+audit_events\s+enable\s+row\s+level\s+security/i.test(sql['011_audit_events.sql'])) {
+  errors.push('011 is missing RLS enablement for audit_events.');
+}
+
+for (const event of ['update', 'delete', 'truncate']) {
+  if (!new RegExp(`before\\s+${event}\\s+on\\s+audit_events\\b`, 'i').test(sql['012_audit_append_only.sql'])) {
+    errors.push(`012 is missing the append-only trigger for ${event.toUpperCase()}.`);
+  }
+}
+if (!/create\s+or\s+replace\s+function\s+audit_events_reject_mutation\s*\(/i.test(sql['012_audit_append_only.sql'])) {
+  errors.push('012 is missing the audit_events_reject_mutation function.');
+}
+if (!/drop\s+constraint\s+if\s+exists\s+audit_events_agency_id_fkey/i.test(sql['012_audit_append_only.sql'])) {
+  errors.push('012 is missing the agency FK removal.');
+}
+
+for (const column of [
+  'vehicle_class',
+  'dry_mass_kg',
+  'propellant_mass_kg',
+  'payload_capacity_kg',
+  'delta_v_budget_m_s',
+  'crew_capacity',
+]) {
+  if (!new RegExp(`add\\s+column\\s+if\\s+not\\s+exists\\s+${column}\\b`, 'i').test(sql['013_mission_feasibility.sql'])) {
+    errors.push(`013 is missing vehicles.${column}.`);
+  }
+}
+if (!/create\s+or\s+replace\s+function\s+vehicles_apply_performance_defaults\s*\(/i.test(sql['013_mission_feasibility.sql'])) {
+  errors.push('013 is missing the vehicle performance default function.');
+}
+if (!/before\s+insert\s+or\s+update\s+on\s+vehicles\b/i.test(sql['013_mission_feasibility.sql'])) {
+  errors.push('013 is missing the vehicle performance default trigger.');
+}
+if (!/vehicles_performance_nonnegative_check/i.test(sql['013_mission_feasibility.sql'])) {
+  errors.push('013 is missing the vehicle performance non-negative constraint.');
+}
+
+if (!/create\s+table\s+if\s+not\s+exists\s+agency_budget_cycles\b/i.test(sql['014_annual_budget.sql'])) {
+  errors.push('014 is missing CREATE TABLE IF NOT EXISTS agency_budget_cycles.');
+}
+for (const column of [
+  'agency_id',
+  'season_id',
+  'cycle_year',
+  'appropriation_usd',
+  'operating_cost_usd',
+  'upkeep_usd',
+  'net_usd',
+  'funding_before_usd',
+  'funding_after_usd',
+  'unpaid_usd',
+  'status',
+  'details',
+]) {
+  if (!new RegExp(`\\b${column}\\b`, 'i').test(sql['014_annual_budget.sql'])) {
+    errors.push(`014 is missing agency_budget_cycles.${column}.`);
+  }
+}
+if (!/unique\s*\(\s*agency_id,\s*season_id,\s*cycle_year\s*\)/i.test(sql['014_annual_budget.sql'])) {
+  errors.push('014 is missing the annual budget cycle uniqueness guard.');
+}
+if (!/alter\s+table\s+agency_budget_cycles\s+enable\s+row\s+level\s+security/i.test(sql['014_annual_budget.sql'])) {
+  errors.push('014 is missing RLS enablement for agency_budget_cycles.');
+}
+if (!/create\s+policy\s+agency_budget_cycles_read_own/i.test(sql['014_annual_budget.sql'])) {
+  errors.push('014 is missing the read-own policy for agency_budget_cycles.');
+}
+if (!/create\s+or\s+replace\s+function\s+settle_annual_budget\s*\(/i.test(sql['014_annual_budget.sql'])) {
+  errors.push('014 is missing the settle_annual_budget function.');
+}
+if (!/grant\s+execute\s+on\s+function\s+settle_annual_budget/i.test(sql['014_annual_budget.sql'])) {
+  errors.push('014 is missing the settle_annual_budget service_role grant.');
 }
 
 const snapshotPath = path.join(root, 'supabase', 'schema.sql');

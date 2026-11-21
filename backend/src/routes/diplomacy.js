@@ -1,5 +1,6 @@
 const express = require('express');
 const { createAuthMiddleware } = require('../middleware/auth');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const {
   DiplomacyError,
   createProposal,
@@ -79,6 +80,8 @@ module.exports = (supabase, deps = {}) => {
   const router = express.Router();
   const authenticate = deps.authenticate || createAuthMiddleware(supabase);
   const rateLimit = deps.rateLimit || createRateLimiter();
+  const writeRateLimit = deps.writeRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 30 });
   const clock = deps.now || (() => new Date());
 
   router.use(authenticate);
@@ -162,7 +165,7 @@ module.exports = (supabase, deps = {}) => {
     res.json(preview);
   }));
 
-  router.post('/proposals', asyncRoute(async (req, res) => {
+  router.post('/proposals', writeRateLimit, asyncRoute(async (req, res) => {
     const body = req.body || {};
     const agency = await loadOwnedAgency(supabase, req, body.agencyId);
     const limit = rateLimit(`${req.authUser.id}:${agency.id}`, Date.now());
@@ -184,7 +187,7 @@ module.exports = (supabase, deps = {}) => {
     res.status(201).json(result);
   }));
 
-  router.post('/proposals/:id/respond', asyncRoute(async (req, res) => {
+  router.post('/proposals/:id/respond', writeRateLimit, asyncRoute(async (req, res) => {
     const body = req.body || {};
     const agency = await loadOwnedAgency(supabase, req, body.agencyId);
     const result = await respondToProposal(supabase, {
@@ -199,7 +202,7 @@ module.exports = (supabase, deps = {}) => {
     res.json(result);
   }));
 
-  router.post('/proposals/:id/withdraw', asyncRoute(async (req, res) => {
+  router.post('/proposals/:id/withdraw', writeRateLimit, asyncRoute(async (req, res) => {
     const body = req.body || {};
     const agency = await loadOwnedAgency(supabase, req, body.agencyId);
     const result = await withdrawProposal(supabase, {
@@ -216,7 +219,7 @@ module.exports = (supabase, deps = {}) => {
     res.json(agreements);
   }));
 
-  router.post('/agreements/:id/terminate', asyncRoute(async (req, res) => {
+  router.post('/agreements/:id/terminate', writeRateLimit, asyncRoute(async (req, res) => {
     const body = req.body || {};
     const agency = await loadOwnedAgency(supabase, req, body.agencyId);
     const result = await terminateAgreement(supabase, {

@@ -17,6 +17,8 @@ function createDatabase(overrides = {}) {
     agencies: [{
       id: 'agency-1',
       season_id: 'season-1',
+      user_id: 'user-1',
+      controller_type: 'player',
       alignment: 'INDEPENDENT',
       science_points: 500,
       funding_usd: 50000000,
@@ -74,7 +76,7 @@ test('research start charges canonical costs and schedules TECH_COMPLETE', async
   try {
     const response = await fetch(`${baseUrl}/api/research/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
       body: JSON.stringify({ agencyId: 'agency-1', nodeId: 'rocketry-1' }),
     });
     const body = await response.json();
@@ -88,6 +90,11 @@ test('research start charges canonical costs and schedules TECH_COMPLETE', async
     assert.equal(database.scheduled_events.length, 1);
     assert.equal(database.scheduled_events[0].event_type, 'TECH_COMPLETE');
     assert.equal(database.logs[0].event_type, 'RESEARCH_STARTED');
+
+    const audit = database.audit_events.find((event) => event.action === 'RESEARCH_STARTED');
+    assert.ok(audit, 'research start should be audited');
+    assert.equal(audit.actor_type, 'player');
+    assert.deepEqual(audit.delta_data, { science_points: -125, funding_usd: -2000000 });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -104,7 +111,7 @@ test('research start rejects export-controlled nodes without bloc standing', asy
   try {
     const response = await fetch(`${baseUrl}/api/research/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
       body: JSON.stringify({ agencyId: 'agency-1', nodeId: 'rocketry-1' }),
     });
     const body = await response.json();
@@ -135,7 +142,7 @@ test('static fire schedules a test, deducts funding, and blocks duplicates', asy
     const payload = { agencyId: 'agency-1', nodeId: 'rocketry-1' };
     const response = await fetch(`${baseUrl}/api/research/static-fire`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
       body: JSON.stringify(payload),
     });
     const body = await response.json();
@@ -149,9 +156,15 @@ test('static fire schedules a test, deducts funding, and blocks duplicates', asy
     assert.equal(database.scheduled_events[0].status, 'PENDING');
     assert.equal(database.logs[0].event_type, 'STATIC_FIRE_STARTED');
 
+    const audit = database.audit_events.find((event) => event.action === 'STATIC_FIRE_STARTED');
+    assert.ok(audit, 'static fire should be audited');
+    assert.equal(audit.actor_type, 'player');
+    assert.equal(audit.delta_data.funding_usd, -300000);
+    assert.equal(audit.entity_id, body.eventId || database.scheduled_events[0].id);
+
     const duplicate = await fetch(`${baseUrl}/api/research/static-fire`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
       body: JSON.stringify(payload),
     });
     const duplicateBody = await duplicate.json();

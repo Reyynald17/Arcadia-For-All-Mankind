@@ -25,6 +25,8 @@ function createDatabase() {
       id: 'agency-1',
       season_id: 'season-1',
       name: 'Test Agency',
+      user_id: 'user-1',
+      controller_type: 'player',
       alignment: 'INDEPENDENT',
       science_points: 50,
       funding_usd: 15000000,
@@ -71,11 +73,16 @@ function createDatabase() {
   };
 }
 
+function authenticate(req, _res, next) {
+  req.authUser = { id: 'user-1' };
+  next();
+}
+
 async function startServer(client) {
   const app = express();
   app.use(express.json());
-  app.use('/api/economy', economyRoutes(client));
-  app.use('/api/launch', launchRoutes(client));
+  app.use('/api/economy', economyRoutes(client, { authenticate }));
+  app.use('/api/launch', launchRoutes(client, { authenticate }));
 
   const server = await new Promise((resolve) => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
@@ -158,6 +165,29 @@ test('economy and queue endpoints report migration-required when tables are miss
   }
 });
 
+test('offers expose the projected annual operating budget and upkeep', async () => {
+  const database = createDatabase();
+  database.agencies[0].total_engineers = 30;
+  const { client } = createFakeSupabase(database, { rpc: economyRpc(database) });
+  const { server, baseUrl } = await startServer(client);
+
+  try {
+    const response = await fetch(`${baseUrl}/api/economy/offers/agency-1`);
+    const body = await response.json();
+
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.budget.appropriation.total_usd, 7800000);
+    assert.equal(body.budget.operating.total_usd, 3000000);
+    assert.equal(body.budget.upkeep.vehicle_count, 2);
+    assert.equal(body.budget.upkeep.total_usd, 480000);
+    assert.equal(body.budget.net_usd, 4320000);
+    assert.ok(body.budget.next_review_game_date);
+    assert.equal(body.budget.history_migration_required, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('grant claim is one-time and credits the agency through the RPC', async () => {
   const database = createDatabase();
   const { client } = createFakeSupabase(database, { rpc: economyRpc(database) });
@@ -171,11 +201,21 @@ test('grant claim is one-time and credits the agency through the RPC', async () 
     assert.equal(first.body.new_stats.funding_usd, 17000000);
     assert.equal(database.agency_grants.length, 1);
 
+    const audit = database.audit_events.filter((event) => event.action === 'GRANT_CLAIMED');
+    assert.equal(audit.length, 1);
+    assert.equal(audit[0].actor_type, 'player');
+    assert.equal(audit[0].entity_id, 'STARTUP_CAPITAL');
+    assert.equal(audit[0].delta_data.funding_usd, 2000000);
+
     const second = await postJson(baseUrl, '/api/economy/grants/STARTUP_CAPITAL/claim', {
       agencyId: 'agency-1',
     });
     assert.equal(second.response.status, 409, JSON.stringify(second.body));
     assert.equal(database.agencies[0].funding_usd, 17000000);
+    assert.equal(
+      database.audit_events.filter((event) => event.action === 'GRANT_CLAIMED').length,
+      1,
+    );
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -210,12 +250,19 @@ test('contract mission pays base reward plus contract reward once', async () => 
     assert.equal(completion.rewards.funding_usd, 1100000);
     assert.equal(completion.rewards.rp, 4);
     assert.equal(completion.rewards.science_points, 10);
-    assert.equal(database.agencies[0].funding_usd, 15850000);
+    assert.equal(database.agencies[0].funding_usd, 15779000);
     assert.equal(database.agencies[0].rp, 14);
     assert.equal(database.agencies[0].science_points, 80);
     assert.equal(database.agency_contracts[0].status, 'COMPLETED');
     assert.equal(database.mission_queue[0].status, 'COMPLETED');
     assert.equal(database.mission_rewards.length, 1);
+
+    const audit = database.audit_events.find((event) => event.action === 'MISSION_REWARDED');
+    assert.ok(audit, 'mission reward should be audited');
+    assert.equal(audit.actor_type, 'system');
+    assert.equal(audit.delta_data.funding_usd, 1100000);
+    assert.equal(audit.delta_data.rp, 4);
+    assert.equal(audit.delta_data.science_points, 10);
 
     const replay = await completeMissionWithExistingEvent(client, database);
     assert.equal(replay.rewards.already_applied, true);

@@ -1,5 +1,10 @@
 const express = require('express');
 const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
+const {
   CONTRACT_CATALOG,
   GRANT_CATALOG,
   getContract,
@@ -10,6 +15,8 @@ const {
   publicGrant,
 } = require('../services/economyEngine');
 const { promoteNextMission } = require('../services/missionQueue');
+const { getBudgetOverview } = require('../services/budgetEngine');
+const { recordAuditEvent, playerActor } = require('../services/auditLog');
 
 function migrationMissing(error) {
   const code = String(error?.code || '');
@@ -29,10 +36,16 @@ function migrationResponse(res) {
   });
 }
 
-module.exports = (supabase) => {
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
+  const writeRateLimit = deps.writeRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 30 });
 
-  router.get('/offers/:agencyId', async (req, res) => {
+  router.use(authenticate);
+
+  router.get('/offers/:agencyId', requireOwnedAgency, async (req, res) => {
     const { agencyId } = req.params;
     try {
       const [agencyResult, contractsResult, grantsResult, rewardsResult] = await Promise.all([
@@ -86,6 +99,8 @@ module.exports = (supabase) => {
         };
       });
 
+      const budget = await getBudgetOverview(supabase, agency);
+
       res.json({
         agency: {
           id: agency.id,
@@ -96,6 +111,7 @@ module.exports = (supabase) => {
           total_launches: agency.total_launches,
           successful_launches: agency.successful_launches,
         },
+        budget,
         contracts,
         grants,
         recent_rewards: rewardsResult.data || [],
@@ -110,7 +126,7 @@ module.exports = (supabase) => {
     }
   });
 
-  router.post('/contracts/:key/accept', async (req, res) => {
+  router.post('/contracts/:key/accept', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const { agencyId } = req.body || {};
     const key = req.params.key;
     if (!agencyId) return res.status(400).json({ error: 'Missing agencyId' });
@@ -198,7 +214,7 @@ module.exports = (supabase) => {
     }
   });
 
-  router.post('/grants/:key/claim', async (req, res) => {
+  router.post('/grants/:key/claim', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const { agencyId } = req.body || {};
     const key = req.params.key;
     if (!agencyId) return res.status(400).json({ error: 'Missing agencyId' });
@@ -264,6 +280,28 @@ module.exports = (supabase) => {
       if (logError) {
         console.error(`grant claim log: ${logError.message}`);
       }
+
+      await recordAuditEvent(supabase, {
+        ...playerActor(req),
+        seasonId: agency.season_id || null,
+        agencyId,
+        action: 'GRANT_CLAIMED',
+        entityType: 'grant',
+        entityId: key,
+        beforeData: {
+          funding_usd: Number(agency.funding_usd || 0),
+          science_points: Number(agency.science_points || 0),
+        },
+        afterData: {
+          funding_usd: result?.funding_usd ?? null,
+          science_points: result?.science_points ?? null,
+        },
+        deltaData: {
+          funding_usd: Number(definition.reward.funding_usd || 0),
+          science_points: Number(definition.reward.science_points || 0),
+        },
+        metadata: { grant_name: definition.name },
+      });
 
       let promotion = null;
       try {

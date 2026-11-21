@@ -1,5 +1,12 @@
 const express = require('express');
+const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
+const { createRateLimitMiddleware } = require('../middleware/rateLimit');
 const { MissionScheduleError, scheduleMission } = require('../services/missionScheduler');
+const { evaluateMissionFeasibility } = require('../services/missionFeasibility');
+const { MISSION_TYPES } = require('../services/economyEngine');
 const {
   MissionQueueError,
   listMissionQueue,
@@ -38,14 +45,22 @@ function sendError(res, error) {
   if (status >= 500) {
     return res.status(status).json({ error: message });
   }
-  return res.status(status).json({ error: message, message });
+  const payload = { error: message, message };
+  if (error?.details) payload.details = error.details;
+  return res.status(status).json(payload);
 }
 
-module.exports = (supabase) => {
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
+  const writeRateLimit = deps.writeRateLimit
+    || createRateLimitMiddleware({ windowMs: 60000, max: 30 });
+
+  router.use(authenticate);
 
   // Schedule a mission immediately. Rollout and ignition are completed by the event worker.
-  router.post('/mission', async (req, res) => {
+  router.post('/mission', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const body = req.body || {};
     try {
       const result = await scheduleMission({
@@ -65,8 +80,58 @@ module.exports = (supabase) => {
     }
   });
 
+  // Preview the delta-v, payload, crew, and funding envelope before scheduling.
+  router.get('/feasibility/:agencyId', requireOwnedAgency, async (req, res) => {
+    const { agencyId } = req.params;
+    const { vehicleId, missionType, targetInclinationDeg } = req.query;
+
+    if (!vehicleId || !missionType) {
+      return res.status(400).json({
+        error: 'vehicleId and missionType are required',
+        message: 'vehicleId and missionType are required',
+      });
+    }
+    if (!MISSION_TYPES.has(missionType)) {
+      return res.status(400).json({
+        error: `Unknown mission type: ${missionType}`,
+        message: `Unknown mission type: ${missionType}`,
+      });
+    }
+
+    try {
+      const [{ data: agency, error: agencyError }, { data: vehicle, error: vehicleError }] =
+        await Promise.all([
+          supabase.from('agencies').select('*').eq('id', agencyId).single(),
+          supabase.from('vehicles').select('*').eq('id', vehicleId).single(),
+        ]);
+
+      if (agencyError || !agency) {
+        return res.status(404).json({ error: 'Agency not found', message: 'Agency not found' });
+      }
+      if (vehicleError || !vehicle) {
+        return res.status(404).json({ error: 'Vehicle not found', message: 'Vehicle not found' });
+      }
+      if (vehicle.agency_id !== agencyId) {
+        return res.status(403).json({
+          error: 'Vehicle does not belong to this agency',
+          message: 'Vehicle does not belong to this agency',
+        });
+      }
+
+      const feasibility = evaluateMissionFeasibility({
+        agency,
+        vehicle,
+        missionType,
+        targetInclinationDeg,
+      });
+      res.json({ feasibility });
+    } catch (error) {
+      sendError(res, error);
+    }
+  });
+
   // Queue a mission. The next item starts automatically when the pad is clear.
-  router.post('/queue', async (req, res) => {
+  router.post('/queue', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const body = req.body || {};
     try {
       const result = await enqueueMission({
@@ -85,7 +150,7 @@ module.exports = (supabase) => {
     }
   });
 
-  router.get('/queue/:agencyId', async (req, res) => {
+  router.get('/queue/:agencyId', requireOwnedAgency, async (req, res) => {
     try {
       const result = await listMissionQueue(supabase, req.params.agencyId);
       res.json(result);
@@ -94,7 +159,7 @@ module.exports = (supabase) => {
     }
   });
 
-  router.post('/queue/:queueId/cancel', async (req, res) => {
+  router.post('/queue/:queueId/cancel', writeRateLimit, requireOwnedAgency, async (req, res) => {
     const { agencyId } = req.body || {};
     if (!agencyId) return res.status(400).json({ error: 'Missing agencyId' });
 
@@ -107,7 +172,7 @@ module.exports = (supabase) => {
     }
   });
 
-  router.post('/queue/:agencyId/dispatch', async (req, res) => {
+  router.post('/queue/:agencyId/dispatch', writeRateLimit, requireOwnedAgency, async (req, res) => {
     try {
       const promotion = await promoteNextMission(supabase, req.params.agencyId);
       res.json({ promotion });

@@ -1,13 +1,21 @@
 const express = require('express');
+const {
+  createAuthMiddleware,
+  createAgencyOwnershipMiddleware,
+} = require('../middleware/auth');
 const { loadActiveSeason } = require('../services/gameClock');
 const { buildOrbitOverview } = require('../services/orbitalEngine');
 
 const TRACKED_MISSION_STATUSES = ['ROLLOUT', 'COUNTDOWN', 'ASCENT', 'ORBIT'];
 
-module.exports = (supabase) => {
+module.exports = (supabase, deps = {}) => {
   const router = express.Router();
+  const authenticate = deps.authenticate || createAuthMiddleware(supabase);
+  const requireOwnedAgency = deps.requireOwnedAgency || createAgencyOwnershipMiddleware(supabase);
 
-  router.get('/overview/:agencyId', async (req, res) => {
+  router.use(authenticate);
+
+  router.get('/overview/:agencyId', requireOwnedAgency, async (req, res) => {
     try {
       const { agencyId } = req.params;
 
